@@ -1,0 +1,23 @@
+{
+ "asr_vi": {
+  "onnx": "C:/Users/Admin/Downloads/OneVoice/outputs/zip150_ctc/zip150_ctc_static_1500.onnx"
+ },
+ "asr_xx": {
+  "onnx": "C:/Users/Admin/Downloads/AuraTranslateEdge-OneVoice/outputs/sensevoice-e2e-onnx/model_sv_combined_single_inline.onnx"
+ },
+ "tts_vi": {
+  "onnx": "C:/Users/Admin/Downloads/piper/g2p/piper_vi_full_g8.onnx"
+ },
+ "tts_zh": {
+  "onnx": "C:/Users/Admin/Downloads/melo_npu/work/melo_one.onnx"
+ },
+ "tts_enko": {
+  "onnx": "C:/Users/Admin/Downloads/supertonic_npu/build/supertonic_full_v3.onnx"
+ },
+ "mt_enc": {
+  "onnx": "C:/Users/Admin/Downloads/s2s_npu/work/nllb_split/nllb_enc.onnx"
+ },
+ "mt_dec": {
+  "onnx": "C:/Users/Admin/Downloads/s2s_npu/work/nllb_split/nllb_dec.onnx"
+ }
+}

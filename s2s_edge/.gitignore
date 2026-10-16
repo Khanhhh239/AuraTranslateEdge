@@ -1,0 +1,10 @@
+models/
+*.onnx
+*.dlc
+*.bin
+__pycache__/
+*.pyc
+logs/*.wav
+golden/
+logs/
+samples/*.wav
