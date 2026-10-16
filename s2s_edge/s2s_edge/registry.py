@@ -33,7 +33,7 @@ class Registry:
     def mt(self):
         if "mt" in self.cfg: return Nllb(self.graph("mt"), ASSETS)
         from .mt import NllbSplit
-        return NllbSplit(self.graph("mt_enc"), self.graph("mt_dec"), ASSETS)
+        e = self.cfg["mt_enc"]; return NllbSplit(self.graph("mt_enc"), self.graph("mt_dec"), ASSETS, S=e.get("S", 32), Tm=self.cfg["mt_dec"].get("Tm", 48))
 
     def tts(self, lang):
         if lang == "vi": return TtsVi(self.graph("tts_vi"))

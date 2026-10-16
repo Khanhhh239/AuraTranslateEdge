@@ -1,9 +1,6 @@
 {
  "asr_vi": {
-  "onnx": "C:/Users/Admin/Downloads/OneVoice/outputs/zip150_ctc/zip150_ctc_static_1500.onnx"
- },
- "asr_xx": {
-  "onnx": "C:/Users/Admin/Downloads/AuraTranslateEdge-OneVoice/outputs/sensevoice-e2e-onnx/model_sv_combined_single_inline.onnx"
+  "onnx": "C:/Users/Admin/Downloads/s2s_pkg/dev_onnx/zip150_ctc_static_1500.onnx"
  },
  "tts_vi": {
   "onnx": "C:/Users/Admin/Downloads/piper/g2p/piper_vi_full_g8.onnx"
@@ -19,5 +16,11 @@
  },
  "mt_dec": {
   "onnx": "C:/Users/Admin/Downloads/s2s_npu/work/nllb_split/nllb_dec.onnx"
+ },
+ "asr_xx_frontend": {
+  "onnx": "C:/Users/Admin/Downloads/s2s_pkg/dev_onnx/sv_frontend_v3.onnx"
+ },
+ "asr_xx_encoder": {
+  "onnx": "C:/Users/Admin/Downloads/s2s_pkg/dev_onnx/sv_enc_cls.onnx"
  }
 }

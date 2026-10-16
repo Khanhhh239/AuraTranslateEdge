@@ -11,9 +11,9 @@ CLAUSE = re.compile(r"(?<=[,，、:：])\s*")
 
 
 class Nllb:
-    def __init__(self, graph, assets_dir):
+    def __init__(self, graph, assets_dir, S=S):
         import sentencepiece as spm
-        self.g = graph; self.sp = spm.SentencePieceProcessor(model_file=os.path.join(assets_dir, "nllb_spm.model"))
+        self.S = S; self.g = graph; self.sp = spm.SentencePieceProcessor(model_file=os.path.join(assets_dir, "nllb_spm.model"))
         self.ids = json.load(open(os.path.join(assets_dir, "nllb_ids.json"), encoding="utf-8")); self.lang = self.ids["lang"]
         self.calls = 0; self.truncations = 0
 
@@ -25,7 +25,7 @@ class Nllb:
         return self.sp.decode(keep)
 
     def _run(self, toks, src, tgt):
-        a = np.ones((1, S), np.int32); seq = [self.lang[CODES[src]]] + toks + [2]; a[0, :len(seq)] = seq
+        a = np.ones((1, self.S), np.int32); seq = [self.lang[CODES[src]]] + toks + [2]; a[0, :len(seq)] = seq
         out = np.asarray(self.g(src_ids=a, tgt_lang=np.array([self.lang[CODES[tgt]]], np.int32))[0]).reshape(-1)
         self.calls += 1; body = [int(v) for v in out[1:]]
         return body, (2 in body)
@@ -42,14 +42,14 @@ class Nllb:
         text = text.strip()
         if not text: return ""
         toks = self.encode(text)
-        if len(toks) <= S - 2:
+        if len(toks) <= self.S - 2:
             body, done = self._run(toks, src, tgt)
             if done or depth > 6:
                 if not done: self.truncations += 1
                 return self.decode(body[: body.index(2)] if 2 in body else body)
         parts = self._split(text, src)
         if len(parts) == 1:                                        # cannot split further: accept the truncated output
-            self.truncations += 1; body, _ = self._run(toks[: S - 2], src, tgt); return self.decode(body[: body.index(2)] if 2 in body else body)
+            self.truncations += 1; body, _ = self._run(toks[: self.S - 2], src, tgt); return self.decode(body[: body.index(2)] if 2 in body else body)
         sep = "" if tgt == "zh" else " "
         return sep.join(x for x in (self._tr(p, src, tgt, depth + 1) for p in parts) if x)
 
@@ -62,15 +62,13 @@ class Nllb:
 class NllbSplit(Nllb):
     """Same host logic, but the model is two static graphs (encoder, one decoder step with static KV cache) and the greedy decode loop runs on the host.
     No 15-token limit (up to Tm-1 = 47 target tokens), small files (no unrolled copies of the decoder weights)."""
-    Tm = 48
-
-    def __init__(self, enc, dec, assets_dir):
-        Nllb.__init__(self, None, assets_dir); self.enc = enc; self.dec = dec; self.L, self.H, self.dk = 12, 16, 64
-        self.steps = 0
+    def __init__(self, enc, dec, assets_dir, S=32, Tm=48):
+        Nllb.__init__(self, None, assets_dir, S=S); self.enc = enc; self.dec = dec; self.L, self.H, self.dk = 12, 16, 64
+        self.Tm = Tm; self.steps = 0
 
     def _run(self, toks, src, tgt):
         Tm, L, H, dk = self.Tm, self.L, self.H, self.dk
-        a = np.ones((1, S), np.int32); seq = [self.lang[CODES[src]]] + toks + [2]; a[0, :len(seq)] = seq; lang = self.lang[CODES[tgt]]
+        a = np.ones((1, self.S), np.int32); seq = [self.lang[CODES[src]]] + toks + [2]; a[0, :len(seq)] = seq; lang = self.lang[CODES[tgt]]
         ck, cv, bias = [np.asarray(x) for x in self.enc(src_ids=a)]
         sk = np.zeros((L, H, Tm, dk), np.float32); sv = sk.copy(); tok = 2; out = []
         for t in range(Tm - 1):

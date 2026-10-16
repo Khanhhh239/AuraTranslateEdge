@@ -33,27 +33,56 @@ class OrtGraph(Graph):
         return self.s.run(None, {k: inputs[k].astype(self.in_types[k], copy=False) for k in self.in_names})
 
 
+_NP = {"float": np.float32, "float32": np.float32, "float16": np.float16, "int32": np.int32, "int64": np.int64, "uint8": np.uint8, "int8": np.int8, "uint16": np.uint16, "int16": np.int16, "uint32": np.uint32}
+_qnn_ready = False
+
+
+def _qnn_init():
+    """QAI AppBuilder (python wheel qai_appbuilder-2.51.40 for linux_aarch64 bundles the QAIRT 2.51 runtime incl. the Hexagon v73 skel; AI Hub jobs are pinned with `--qairt_version 2.51`)."""
+    global _qnn_ready
+    if _qnn_ready: return
+    from qai_appbuilder import QNNConfig, Runtime, LogLevel, ProfilingLevel, PerfProfile
+    QNNConfig.Config(Runtime.HTP, LogLevel.WARN, ProfilingLevel.OFF)
+    try: PerfProfile.SetPerfProfileGlobal(PerfProfile.BURST)          # keep the HTP at burst clocks while the app runs
+    except Exception: pass
+    _qnn_ready = True
+
+
 class QnnGraph(Graph):
-    """NPU backend. Implementations are tried in order; the first that imports wins.
-    1) qai_appbuilder.QNNContext (Qualcomm python wrapper over libQnnHtp; loads an AI Hub context binary)
-    2) subprocess qnn-net-run (slow: process start per call; used only for correctness checks)
-    The correct choice is recorded in tools/recon.sh output; this class is completed on the device (session 0)."""
+    """One compiled graph on the Hexagon NPU through QAI AppBuilder. `path` is a context binary (.bin from an AI Hub link job, must match the wheel's
+    QAIRT version) or a portable .dlc (needs QAIRT >= 2.41; the first load writes a cached <name>.dlc.bin next to it, later loads are fast).
+    Inputs / outputs use the graph's native dtypes (int32 ids, float32 tensors). Output order is the graph's output order; `out_order` can
+    remap it if golden check shows a permutation (models.json: "out": [index, ...])."""
 
     def __init__(self, path, name=None, input_order=None, output_order=None):
-        super().__init__(); self.path = path; self.name = name or os.path.basename(path); self.in_order = input_order; self.out_order = output_order
-        self.impl = None
-        try:
-            from qai_appbuilder import QNNContext, QNNConfig, Runtime, LogLevel, ProfilingLevel, PerfProfile
-            QNNConfig.Config(os.environ.get("QNN_LIB_DIR", ""), Runtime.HTP, LogLevel.WARN, ProfilingLevel.OFF)
-            self.impl = ("appbuilder", QNNContext(self.name, path))
-        except Exception as e:
-            raise RuntimeError(f"No NPU runtime available for {path}: {e}")
+        super().__init__(); _qnn_init()
+        from qai_appbuilder import QNNContext
+        self.path = path; self.name = name or os.path.basename(path); self.out_order = output_order
+        # keyword arguments: the positional order of QNNContext is (name, path, backend_lib, system_lib, is_async, input_dtype, output_dtype, ...)
+        self.ctx = QNNContext(model_name=self.name, model_path=path, input_data_type="native", output_data_type="native")
+        def _try(f, default=None):
+            try: return f()
+            except Exception: return default
+        self.in_names = _try(self.ctx.getInputName, None); self.in_shapes = _try(self.ctx.getInputShapes, None); self.in_types = _try(self.ctx.getInputDataType, None)
+        self.out_shapes = _try(self.ctx.getOutputShapes, None); self.out_types = _try(self.ctx.getOutputDataType, None)
+        self.in_order = input_order or self.in_names
 
     def run(self, inputs):
-        kind, ctx = self.impl
-        order = self.in_order or list(inputs)
-        out = ctx.Inference([inputs[k].reshape(-1) for k in order])
-        return [np.asarray(o) for o in out]
+        order = self.in_order or list(inputs); arrs = []
+        for i, k in enumerate(order):
+            a = inputs[k]
+            if self.in_types and i < len(self.in_types):
+                dt = _NP.get(str(self.in_types[i]).lower().replace("np.", "").replace("numpy.", ""), None)
+                if dt is not None: a = a.astype(dt, copy=False)
+            arrs.append(np.ascontiguousarray(a).reshape(-1))
+        outs = self.ctx.Inference(arrs); res = []
+        for i, o in enumerate(outs):
+            o = np.asarray(o)
+            if self.out_shapes and i < len(self.out_shapes):
+                try: o = o.reshape(tuple(self.out_shapes[i]))
+                except Exception: pass
+            res.append(o)
+        return [res[j] for j in self.out_order] if self.out_order else res
 
 
 def make_graph(model_dir, spec, backend):
