@@ -34,6 +34,13 @@ def inputs_for(reg, key):
         from s2s_edge.tts import TtsEnKo
         t = TtsEnKo(None, "en", ASSETS); s = t._clean(t.p._preprocess_text("Please wear your helmet before entering the factory.", "en")); cp = np.zeros((1, 96), np.int32); cp[0, :len(s)] = [ord(c) for c in s]
         return dict(cp=cp, style_dp=t.dp, style_ttl=t.ttl)
+    if key in ("mt_enc", "mt_dec", "mt_decB"):
+        S_ = reg.cfg["mt_enc"].get("S", 64); Tm = reg.cfg.get("mt_dec", reg.cfg.get("mt_decB", {})).get("Tm", 96); B = reg.cfg.get("mt_decB", {}).get("B", 4)
+        nl = Nllb(None, ASSETS); toks = nl.encode("Hôm nay trời đẹp quá, chúng ta cùng đi dạo nhé."); a = np.ones((1, S_), np.int32); seq = [nl.lang["vie_Latn"]] + toks + [2]; a[0, :len(seq)] = seq
+        if key == "mt_enc": return dict(src_ids=a)
+        ck, cv, bias = [np.asarray(x) for x in reg.graph("mt_enc")(src_ids=a)]
+        nb = B if key == "mt_decB" else None; shp = (12, nb, 16, Tm, 64) if nb else (12, 16, Tm, 64); oh = np.zeros(Tm, np.float32); oh[0] = 1; mask = np.where(np.arange(Tm) <= 0, 0.0, -1e4).astype(np.float32)
+        return dict(tok=np.array([2] * (nb or 1), np.int32), oh=oh, mask=mask, sk=np.zeros(shp, np.float32), sv=np.zeros(shp, np.float32), ck=ck, cv=cv, bias=bias)
     raise KeyError(key)
 
 
@@ -47,9 +54,11 @@ def compare(a, b):
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("mode", choices=["make", "check"]); ap.add_argument("--models", default="models/models.json"); ap.add_argument("--backend", default="npu"); ap.add_argument("--only", default="")
     a = ap.parse_args(); os.makedirs(GOLD, exist_ok=True); reg = Registry(a.models, "cpu" if a.mode == "make" else a.backend)
-    keys = [k for k in a.only.split(",") if k] or [k for k in reg.cfg if k in ("asr_vi", "asr_xx", "asr_xx_frontend", "mt", "tts_vi", "tts_zh", "tts_enko")]; rows = []
+    keys = [k for k in a.only.split(",") if k] or [k for k in reg.cfg if k in ("asr_vi", "asr_xx", "asr_xx_frontend", "mt", "mt_enc", "mt_dec", "mt_decB", "tts_vi", "tts_zh", "tts_enko")]; rows = []
     for k in keys:
-        g = reg.graph(k); ins = inputs_for(reg, k); gp = os.path.join(GOLD, f"{k}.npz")
+        g = reg.graph(k); gp = os.path.join(GOLD, f"{k}.npz")
+        if a.mode == "check" and os.path.exists(gp): z = np.load(gp); ins = {n[3:]: z[n] for n in z.files if n.startswith("in_")}          # exactly the inputs used for the reference
+        else: ins = inputs_for(reg, k)
         t = time.perf_counter(); out = g(**ins); dt = time.perf_counter() - t
         if a.mode == "make":
             np.savez_compressed(gp, **{f"in_{n}": v for n, v in ins.items()}, **{f"out_{i}": np.asarray(o) for i, o in enumerate(out)}); print("saved", gp, f"{os.path.getsize(gp)/1e6:.1f} MB"); continue

@@ -44,6 +44,19 @@ def _hard(text, n, unit):
     return [text[i:i + n] for i in range(0, len(text), n)]
 
 
+def adaptive(text, max_units, unit, synth, depth=0):
+    """Synthesize `text` in pieces of at most max_units; when the graph reports that a piece hit its static audio window (the end would be cut off), halve the
+    piece and synthesize the halves. synth(piece) -> (wave, capped)."""
+    out = []
+    for piece in split_text(text, max_units, unit):
+        w, capped = synth(piece)
+        n = len(piece.split()) if unit == "word" else len(piece)
+        if capped and depth < 4 and n >= 2:
+            out += adaptive(piece, max(1, n // 2), unit, synth, depth + 1)
+        else: out.append(w)
+    return out
+
+
 def _join(waves, sr, pause=0.18):
     if not waves: return np.zeros(0, np.float32), sr
     gap = np.zeros(int(sr * pause), np.float32); out = []
@@ -60,14 +73,15 @@ class TtsVi:
             known = set(open(os.path.join(assets_dir, "piper_vi_words.txt"), encoding="utf-8").read().splitlines())
             self.vn = VietnameseNames(os.path.join(assets_dir, "cmudict_min.json"), known)
 
+    def _synth(self, piece):
+        b = unicodedata.normalize("NFC", piece).encode("utf-8")[:512]; x = np.zeros((1, 512), np.int32); x[0, :len(b)] = list(b)
+        out = self.g(text_bytes=x); audio = np.asarray(out[0]).reshape(-1); yl = int(np.asarray(out[1]).reshape(-1)[0]); self.oov += int(np.asarray(out[2]).reshape(-1)[0])
+        return audio[: max(yl, 1) * 256].astype(np.float32), yl >= 1533
+
     def synthesize(self, text):
         if self.vn is not None: text = latin_to_vi(text, self.vn, self.glossary)     # words outside Piper's table would be silently dropped
-        text = normalize(text.lower(), "vi"); waves = []
-        for piece in split_text(text, self.max_units, "word"):
-            b = unicodedata.normalize("NFC", piece).encode("utf-8")[:512]; x = np.zeros((1, 512), np.int32); x[0, :len(b)] = list(b)
-            out = self.g(text_bytes=x); audio = np.asarray(out[0]).reshape(-1); yl = int(np.asarray(out[1]).reshape(-1)[0]); self.oov += int(np.asarray(out[2]).reshape(-1)[0])
-            waves.append(audio[: max(yl, 1) * 256].astype(np.float32))
-        return _join(waves, self.sr)
+        text = normalize(text.lower(), "vi")
+        return _join(adaptive(text, self.max_units, "word", self._synth), self.sr)
 
 
 class TtsZh:
@@ -75,16 +89,17 @@ class TtsZh:
 
     def __init__(self, graph): self.g = graph
 
+    def _synth(self, piece):
+        b = unicodedata.normalize("NFC", piece).encode("utf-8")[:112]
+        while True:                                            # never cut inside a UTF-8 character
+            try: b.decode("utf-8"); break
+            except UnicodeDecodeError: b = b[:-1]
+        x = np.zeros((1, 112), np.int32); x[0, :len(b)] = list(b); out = self.g(text_bytes=x)
+        audio = np.asarray(out[0]).reshape(-1); yl = int(np.asarray(out[1]).reshape(-1)[0])
+        return audio[: max(yl, 1) * 512].astype(np.float32), yl >= 381
+
     def synthesize(self, text):
-        text = normalize(text, "zh"); waves = []
-        for piece in split_text(text, self.max_units, "char"):
-            b = unicodedata.normalize("NFC", piece).encode("utf-8")[:112]
-            while True:                                            # never cut inside a UTF-8 character
-                try: b.decode("utf-8"); break
-                except UnicodeDecodeError: b = b[:-1]
-            x = np.zeros((1, 112), np.int32); x[0, :len(b)] = list(b); out = self.g(text_bytes=x)
-            audio = np.asarray(out[0]).reshape(-1); yl = int(np.asarray(out[1]).reshape(-1)[0]); waves.append(audio[: max(yl, 1) * 512].astype(np.float32))
-        return _join(waves, self.sr)
+        return _join(adaptive(normalize(text, "zh"), self.max_units, "char", self._synth), self.sr)
 
 
 class TtsEnKo:
@@ -100,12 +115,13 @@ class TtsEnKo:
     def _clean(self, s):
         return "".join(c for c in s if ord(c) < len(self.ok) and self.ok[ord(c)])
 
+    def _synth(self, piece):
+        s = self._clean(self.p._preprocess_text(piece, self.lang))[: self.N]
+        if not s.strip(): return np.zeros(0, np.float32), False
+        cp = np.zeros((1, self.N), np.int32); cp[0, :len(s)] = [ord(c) for c in s]
+        out = self.g(cp=cp, style_dp=self.dp, style_ttl=self.ttl); wav = np.asarray(out[0]).reshape(-1); lat = int(round(float(np.asarray(out[1]).reshape(-1)[0])))
+        return wav[: max(lat, 1) * 3072].astype(np.float32), lat >= len(wav) // 3072 - 2
+
     def synthesize(self, text):
-        text = normalize(text, self.lang); waves = []
-        for piece in split_text(text, self.N - 14, "char"):
-            s = self._clean(self.p._preprocess_text(piece, self.lang))[: self.N]
-            if not s.strip(): continue
-            cp = np.zeros((1, self.N), np.int32); cp[0, :len(s)] = [ord(c) for c in s]
-            out = self.g(cp=cp, style_dp=self.dp, style_ttl=self.ttl); wav = np.asarray(out[0]).reshape(-1); lat = int(round(float(np.asarray(out[1]).reshape(-1)[0])))
-            waves.append(wav[: max(lat, 1) * 3072].astype(np.float32))
-        return _join(waves, self.sr)
+        text = normalize(text, self.lang); units = self.N - 14 if self.lang == "en" else 52            # Korean is spoken slowly: ~52 characters fill the 10 s window
+        return _join([w for w in adaptive(text, units, "char", self._synth) if len(w)], self.sr)

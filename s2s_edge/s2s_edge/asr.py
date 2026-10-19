@@ -34,7 +34,7 @@ class AsrVi:
         text = self.sp.decode(pieces).lower().strip()
         e = np.exp(lgr - lgr.max(-1, keepdims=True)); p = e / e.sum(-1, keepdims=True); nb = ids != 0                 # confidence features for language identification
         words = text.split()
-        self.stats = dict(conf_nb=float(p.max(-1)[nb].mean()) if nb.any() else 0.0, nb_ratio=float(nb.mean()) if real else 0.0,
+        self.stats = dict(conf_nb=float(p.max(-1)[nb].mean()) if nb.any() else 0.0, nb_ratio=float(nb.mean()) if real else 0.0, conf_all=float(p.max(-1).mean()), blank_p=float(p[:, 0].mean()),
                           known=float(np.mean([w in self.known for w in words])) if (words and self.known) else 0.0, nwords=len(words))
         return text
 

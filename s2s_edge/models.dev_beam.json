@@ -25,5 +25,9 @@
   "onnx": "C:/Users/Admin/Downloads/s2s_npu/work/nllb_beam/nllb_decB.onnx",
   "Tm": 96,
   "B": 4
+ },
+ "mt_dec": {
+  "onnx": "C:/Users/Admin/Downloads/s2s_npu/work/nllb_split_s64/nllb_dec.onnx",
+  "Tm": 96
  }
 }

@@ -85,22 +85,32 @@ class NllbBeam(NllbSplit):
     """Beam search (default 4 beams) over the batched decoder-step graph. The graph returns logits for the pruned vocabulary; log-softmax, top-k, beam
     bookkeeping and the reordering of the per-beam KV caches happen on the host (numpy). Same length-normalised scoring idea as Hugging Face generate()."""
 
-    def __init__(self, enc, decB, assets_dir, S=64, Tm=96, B=4, length_penalty=1.0):
-        NllbSplit.__init__(self, enc, decB, assets_dir, S=S, Tm=Tm); self.B = B; self.lp = length_penalty
+    def __init__(self, enc, decB, assets_dir, S=64, Tm=96, B=4, length_penalty=1.0, no_repeat_ngram=3):
+        NllbSplit.__init__(self, enc, decB, assets_dir, S=S, Tm=Tm); self.B = B; self.lp = length_penalty; self.nr = no_repeat_ngram
         self.keep = np.load(os.path.join(assets_dir, "nllb_keep.npy")).astype(np.int64)                  # pruned id -> original id
+        self.inv = np.full(int(self.keep.max()) + 1, -1, np.int64); self.inv[self.keep] = np.arange(len(self.keep))
+
+    def _banned(self, toks):
+        """token ids that would repeat an n-gram already generated (stops degenerate loops such as 'the number of RSBs, the number of RSBs, ...')."""
+        n = self.nr
+        if n < 2 or len(toks) < n - 1: return []
+        pre = tuple(toks[-(n - 1):]); return [toks[i + n - 1] for i in range(len(toks) - n + 1) if tuple(toks[i: i + n - 1]) == pre]
 
     def _run(self, toks, src, tgt):
         Tm, L, H, dk, B = self.Tm, self.L, self.H, self.dk, self.B
         a = np.ones((1, self.S), np.int32); seq = [self.lang[CODES[src]]] + toks + [2]; a[0, :len(seq)] = seq; lang = self.lang[CODES[tgt]]
         ck, cv, bias = [np.asarray(x) for x in self.enc(src_ids=a)]
         sk = np.zeros((L, B, H, Tm, dk), np.float32); sv = sk.copy(); alive = [[] for _ in range(B)]; ascore = np.array([0.0] + [-1e9] * (B - 1)); fin = []         # fin: (norm_score, tokens)
-        cur = np.full(B, 2, np.int32)
-        for t in range(Tm - 1):
+        cur = np.full(B, 2, np.int32); tmax = min(Tm - 1, int(2.2 * len(toks)) + 14)                  # runaway guard: target <= 2.2 x source + 14 tokens
+        for t in range(tmax):
             oh = np.zeros(Tm, np.float32); oh[t] = 1.0; mask = np.where(np.arange(Tm) <= t, 0.0, -1e4).astype(np.float32)
             lg, sk, sv = self.dec(tok=cur, oh=oh, mask=mask, sk=sk, sv=sv, ck=ck, cv=cv, bias=bias); self.steps += 1
             sk = np.asarray(sk); sv = np.asarray(sv); lg = np.asarray(lg).reshape(B, -1).astype(np.float64)
             if t == 0: cur = np.full(B, lang, np.int32); continue                                    # decoder start; next input is the forced target-language token
             lp = lg - (lg.max(-1, keepdims=True) + np.log(np.exp(lg - lg.max(-1, keepdims=True)).sum(-1, keepdims=True)))
+            for bi in range(B):
+                for tid in self._banned(alive[bi]):
+                    if tid < len(self.inv) and self.inv[tid] >= 0: lp[bi, self.inv[tid]] = -1e9
             cand = (ascore[:, None] + lp).reshape(-1); top = np.argpartition(-cand, 2 * B)[: 2 * B]; top = top[np.argsort(-cand[top])]
             new_alive, new_score, parents = [], [], []
             for rank, c in enumerate(top):

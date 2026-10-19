@@ -7,7 +7,7 @@ import argparse, json, os, shutil, sys
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # component -> manifest entry name
 MAP = {"asr_vi": "asr_vi_zip150_ctc_fp16", "asr_xx_frontend": "asr_xx_sensevoice_frontend_v3", "asr_xx_encoder": "asr_xx_sensevoice_encoder_q",
-       "mt_enc": "mt_enc_nllb", "mt_dec": "mt_dec_nllb", "tts_vi": "tts_vi_piper_fullg8", "tts_zh": "tts_zh_melo_one", "tts_enko": "tts_enko_supertonic_full_v3"}
+       "mt_enc": "mt_enc_nllb_s64", "mt_dec": "mt_dec_nllb_s64", "mt_decB": "mt_decB_nllb_s64", "tts_vi": "tts_vi_piper_fullg8", "tts_zh": "tts_zh_melo_one", "tts_enko": "tts_enko_supertonic_full_v3"}
 
 INSTALL = """#!/usr/bin/env bash
 # Offline install (no network needed): Python 3.12 on Ubuntu 24.04 aarch64 (Dragonwing IQ-9075).
@@ -50,7 +50,9 @@ def main():
             if name not in man: print("MISSING", comp, name); continue
             src = os.path.join(a.models_dir, man[name]["file"]); dst = os.path.join("models", os.path.basename(src)); shutil.copy(src, os.path.join(out, dst))
             cfg[comp] = {"ctx": os.path.basename(src), "name": comp, "job": man[name]["job"]}
-        json.dump(cfg, open(os.path.join(out, "models", "models.json"), "w"), indent=1)
+        cfg["mt_enc"]["S"] = 64; cfg["mt_dec"]["Tm"] = 96; cfg["mt_decB"].update(Tm=96, B=4)
+        fast = {k: v for k, v in cfg.items() if k != "mt_decB"}                      # greedy decoding (16 ms / step on chip) ; models.json = beam search (31 ms / step, +2.4 chrF)
+        json.dump(cfg, open(os.path.join(out, "models", "models.json"), "w"), indent=1); json.dump(fast, open(os.path.join(out, "models", "models_fast.json"), "w"), indent=1)
         print("models:", {k: v["ctx"] for k, v in cfg.items()})
     tot = sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(out) for f in fs); print(f"package {out}: {tot / 1e9:.2f} GB")
 

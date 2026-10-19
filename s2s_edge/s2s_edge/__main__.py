@@ -22,6 +22,7 @@ def main():
     ap.add_argument("--in", dest="inp")
     ap.add_argument("--out", default="out.wav")
     ap.add_argument("--no-play", action="store_true")
+    ap.add_argument("--continuous", action="store_true", help="live mode without pressing Enter: always listening, translate and speak after each utterance")
     a = ap.parse_args()
     reg = Registry(a.models, a.backend, a.glossary)
     if a.pair or a.auto:
@@ -42,11 +43,12 @@ def main():
     else:
         print(f"Live {label}. Enter = speak, Ctrl+C = quit.")
         while True:
-            input("\n[Enter] to speak > ")
+            if not a.continuous:
+                input("[Enter] to speak > ")
             print("listening...")
             w = listen()
             if len(w) < 4800:
-                print("(nothing heard)")
+                if not a.continuous: print("(nothing heard)")
                 continue
             for r in tr.translate(w):
                 t = r["timing"]

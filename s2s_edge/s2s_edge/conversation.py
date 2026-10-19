@@ -8,7 +8,7 @@ Language identification per utterance (cheap, no extra model):
     text decides (Hangul -> ko, Han -> zh, Latin -> en)."""
 import re
 import numpy as np
-from .audio import SR, segment
+from .audio import SR, segment, normalize_level
 from .asr import AsrXx
 from .names import NameTransliterator
 import time
@@ -47,8 +47,10 @@ class Engine:
 
     def translate_segment(self, wav, src, tgt, text=None):
         """text: pre-computed ASR text (language identification already ran the ASR)."""
-        gr = self.graphs_for(src, tgt); g0, c0 = self.gtime(gr); t = {}; a = time.perf_counter()
+        wav = normalize_level(wav); gr = self.graphs_for(src, tgt); g0, c0 = self.gtime(gr); t = {}; a = time.perf_counter()
         if text is None: text = self.asr(src)(wav)
+        for pat, rep in (self.r.glossary.get("_asr_fix", {}).get(src, {}) or {}).items():      # domain fixes: how the ASR (mis)spells a term -> the term
+            text = re.sub(pat, rep, text, flags=re.IGNORECASE)
         b = time.perf_counter(); t["asr_s"] = b - a
         mt_text = self.mt(text, src, tgt) if text.strip() else ""
         if tgt in ("zh", "ko") and mt_text: mt_text = self.names(mt_text, tgt)
@@ -60,16 +62,21 @@ class Engine:
 
 
 class LanguageID:
-    VI_CONF = 0.80; VI_KNOWN = 0.80                                   # calibrated on FLEURS vi / en / zh / ko (tools/lid_features.py, docs/lid.md)
+    """vi / not-vi from confidence statistics of the Vietnamese CTC model: logistic regression on six features (assets/lid_vi.json, trained on FLEURS
+    clean speech: 10-fold CV 100 % on 120 clips, see docs/conversation.md). `bias` shifts the decision (positive = more willing to call it Vietnamese)."""
 
-    def __init__(self, engine):
-        self.e = engine
+    def __init__(self, engine, model_path=None, bias=0.0):
+        import json, os
+        from .registry import ASSETS
+        self.e = engine; self.bias = bias; self.m = json.load(open(model_path or os.path.join(ASSETS, "lid_vi.json"), encoding="utf-8"))
 
-    def vi_score(self, stats):
-        return stats["known"] if stats["nwords"] >= 2 else 0.0
+    def vi_prob(self, st):
+        x = np.array([st["conf_nb"], st["known"], st["nb_ratio"], st.get("conf_all", st["conf_nb"]), st.get("blank_p", 1 - st["nb_ratio"]), min(st["nwords"], 30) / 30.0])
+        z = float(((x - np.array(self.m["mean"])) / np.array(self.m["scale"])) @ np.array(self.m["coef"]) + self.m["intercept"] + self.bias)
+        return 1.0 / (1.0 + np.exp(-z))
 
     def is_vi(self, stats):
-        return stats["nwords"] >= 2 and stats["known"] >= self.VI_KNOWN and stats["conf_nb"] >= self.VI_CONF
+        return stats["nwords"] >= 1 and self.vi_prob(stats) >= 0.5
 
     def other(self, wav, candidates):
         if len(candidates) == 1: return candidates[0], None
@@ -97,6 +104,6 @@ class Conversation:
     def translate(self, wav, max_seg_s=12.0):
         out = []
         for a, b in segment(wav, max_s=max_seg_s):
-            seg = wav[a:b]; src, tgt, text, st = self.route(seg); r = self.e.translate_segment(seg, src, tgt, text=text)
+            seg = normalize_level(wav[a:b]); src, tgt, text, st = self.route(seg); r = self.e.translate_segment(seg, src, tgt, text=text)
             r["span"] = (a / SR, b / SR); r["lid"] = st; out.append(r)
         return out
