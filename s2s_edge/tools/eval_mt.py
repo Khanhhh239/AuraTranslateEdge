@@ -6,10 +6,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import sacrebleu
 from s2s_edge.registry import Registry, DIRECTIONS
 
-ap = argparse.ArgumentParser(); ap.add_argument("--models", required=True); ap.add_argument("--eval", required=True); ap.add_argument("--n", type=int, default=25); ap.add_argument("--out", default="logs/eval_mt.json"); ap.add_argument("--backend", default="cpu")
+ap = argparse.ArgumentParser(); ap.add_argument("--models", required=True); ap.add_argument("--eval", required=True); ap.add_argument("--n", type=int, default=25); ap.add_argument("--out", default="logs/eval_mt.json"); ap.add_argument("--backend", default="cpu"); ap.add_argument("--dirs", default="")
 a = ap.parse_args(); sys.stdout.reconfigure(encoding="utf-8"); reg = Registry(a.models, a.backend); mt = reg.mt(); res = {}
 man = {l: json.load(open(os.path.join(a.eval, f"manifest_{l}.json"), encoding="utf-8"))[: a.n] for l in ("vi", "en", "zh", "ko")}
-for src, tgt in DIRECTIONS:
+for src, tgt in ([tuple(d.split("-")) for d in a.dirs.split(",")] if a.dirs else DIRECTIONS):
     hyps, refs, t0 = [], [], time.time(); c0, tr0 = mt.calls, mt.truncations
     for it in man[src]:
         hyps.append(mt(it["refs"][src], src, tgt)); refs.append(it["refs"][tgt])

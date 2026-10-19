@@ -99,3 +99,16 @@ def listen(max_s=12.0, silence_s=0.9, start_timeout_s=8.0, sr=SR):
     finally:
         stop()
     return np.concatenate(chunks) if chunks else np.zeros(0, np.float32)
+
+
+def concat_results(results, gap_s=0.25):
+    """Join per-utterance outputs that may have different sample rates (Piper 22.05 kHz, Melo / Supertonic 44.1 kHz) into one wav. Returns (wave, sr)."""
+    from math import gcd
+    from scipy.signal import resample_poly
+    ws = [(r["wav"], r["sr"]) for r in results if len(r["wav"])]
+    if not ws: return np.zeros(0, np.float32), 16000
+    sr = max(s for _, s in ws); out = []
+    for w, s in ws:
+        if s != sr: g = gcd(int(sr), int(s)); w = resample_poly(w, int(sr) // g, int(s) // g).astype(np.float32)
+        out += [w, np.zeros(int(sr * gap_s), np.float32)]
+    return np.concatenate(out[:-1]), sr

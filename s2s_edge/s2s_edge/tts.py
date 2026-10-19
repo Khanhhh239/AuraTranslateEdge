@@ -6,6 +6,7 @@ so every chunk fits the static graph, and chunks are joined with a short pause.
  TtsEnKo: Supertonic-3 fused graph          cp[1,96] i32 (unicode ids), style_dp, style_ttl -> wav[1,460800] f32 (44.1 kHz), lat_len f32 (samples = lat_len*3072)"""
 import os, re, unicodedata, numpy as np
 from .textnorm import normalize
+from .names import VietnameseNames, latin_to_vi
 
 SENT = re.compile(r"(?<=[\.\!\?;。！？；\n])\s*")
 CLAUSE = re.compile(r"(?<=[,，、:：])\s*")
@@ -53,9 +54,14 @@ def _join(waves, sr, pause=0.18):
 class TtsVi:
     sr = 22050; unit, max_units = "word", 26
 
-    def __init__(self, graph): self.g = graph; self.oov = 0
+    def __init__(self, graph, assets_dir=None, glossary=None):
+        self.g = graph; self.oov = 0; self.glossary = glossary; self.vn = None
+        if assets_dir and os.path.exists(os.path.join(assets_dir, "piper_vi_words.txt")):
+            known = set(open(os.path.join(assets_dir, "piper_vi_words.txt"), encoding="utf-8").read().splitlines())
+            self.vn = VietnameseNames(os.path.join(assets_dir, "cmudict_min.json"), known)
 
     def synthesize(self, text):
+        if self.vn is not None: text = latin_to_vi(text, self.vn, self.glossary)     # words outside Piper's table would be silently dropped
         text = normalize(text.lower(), "vi"); waves = []
         for piece in split_text(text, self.max_units, "word"):
             b = unicodedata.normalize("NFC", piece).encode("utf-8")[:512]; x = np.zeros((1, 512), np.int32); x[0, :len(b)] = list(b)

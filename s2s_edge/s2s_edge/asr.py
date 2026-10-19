@@ -4,7 +4,7 @@ import os, numpy as np
 from .audio import SR
 
 T_FRAMES = 1500                                                  # Zipformer static window: 1500 fbank frames = 15 s
-LID = {"zh": 3, "en": 4, "ko": 12}
+LID = {"auto": 0, "zh": 3, "en": 4, "ko": 12}
 
 
 def _fbank(w):
@@ -18,20 +18,25 @@ def _fbank(w):
 class AsrVi:
     max_s = 14.5
 
-    def __init__(self, graph, bpe_path):
+    def __init__(self, graph, bpe_path, known_words=None):
         import sentencepiece as spm
-        self.g = graph; self.sp = spm.SentencePieceProcessor(model_file=bpe_path)
+        self.g = graph; self.sp = spm.SentencePieceProcessor(model_file=bpe_path); self.known = known_words; self.stats = {}
 
     def __call__(self, wav):
         f = _fbank(wav[: int(self.max_s * SR)]); n = min(len(f), T_FRAMES); x = np.zeros((1, T_FRAMES, 80), np.float32); x[0, :n] = f[:n]
         out = self.g(x=x, x_lens=np.array([n], np.int64))
         lg, el = (out[0], out[1]) if np.asarray(out[0]).ndim == 3 else (out[1], out[0])
-        lg = np.asarray(lg).reshape(1, -1, 2000); real = int(np.asarray(el).reshape(-1)[0]); ids = lg[0, :real].argmax(-1)
+        lg = np.asarray(lg).reshape(1, -1, 2000); real = int(np.asarray(el).reshape(-1)[0]); lgr = lg[0, :real].astype(np.float64); ids = lgr.argmax(-1)
         pieces, prev = [], None
         for t in ids:
             if t != 0 and t != prev: pieces.append(int(t))
             prev = t
-        return self.sp.decode(pieces).lower().strip()
+        text = self.sp.decode(pieces).lower().strip()
+        e = np.exp(lgr - lgr.max(-1, keepdims=True)); p = e / e.sum(-1, keepdims=True); nb = ids != 0                 # confidence features for language identification
+        words = text.split()
+        self.stats = dict(conf_nb=float(p.max(-1)[nb].mean()) if nb.any() else 0.0, nb_ratio=float(nb.mean()) if real else 0.0,
+                          known=float(np.mean([w in self.known for w in words])) if (words and self.known) else 0.0, nwords=len(words))
+        return text
 
 
 class AsrXx:

@@ -79,3 +79,42 @@ class NllbSplit(Nllb):
             if t > 0 and nxt == 2: break
         self.calls += 1; body = out[1:]
         return body, (2 in body)
+
+
+class NllbBeam(NllbSplit):
+    """Beam search (default 4 beams) over the batched decoder-step graph. The graph returns logits for the pruned vocabulary; log-softmax, top-k, beam
+    bookkeeping and the reordering of the per-beam KV caches happen on the host (numpy). Same length-normalised scoring idea as Hugging Face generate()."""
+
+    def __init__(self, enc, decB, assets_dir, S=64, Tm=96, B=4, length_penalty=1.0):
+        NllbSplit.__init__(self, enc, decB, assets_dir, S=S, Tm=Tm); self.B = B; self.lp = length_penalty
+        self.keep = np.load(os.path.join(assets_dir, "nllb_keep.npy")).astype(np.int64)                  # pruned id -> original id
+
+    def _run(self, toks, src, tgt):
+        Tm, L, H, dk, B = self.Tm, self.L, self.H, self.dk, self.B
+        a = np.ones((1, self.S), np.int32); seq = [self.lang[CODES[src]]] + toks + [2]; a[0, :len(seq)] = seq; lang = self.lang[CODES[tgt]]
+        ck, cv, bias = [np.asarray(x) for x in self.enc(src_ids=a)]
+        sk = np.zeros((L, B, H, Tm, dk), np.float32); sv = sk.copy(); alive = [[] for _ in range(B)]; ascore = np.array([0.0] + [-1e9] * (B - 1)); fin = []         # fin: (norm_score, tokens)
+        cur = np.full(B, 2, np.int32)
+        for t in range(Tm - 1):
+            oh = np.zeros(Tm, np.float32); oh[t] = 1.0; mask = np.where(np.arange(Tm) <= t, 0.0, -1e4).astype(np.float32)
+            lg, sk, sv = self.dec(tok=cur, oh=oh, mask=mask, sk=sk, sv=sv, ck=ck, cv=cv, bias=bias); self.steps += 1
+            sk = np.asarray(sk); sv = np.asarray(sv); lg = np.asarray(lg).reshape(B, -1).astype(np.float64)
+            if t == 0: cur = np.full(B, lang, np.int32); continue                                    # decoder start; next input is the forced target-language token
+            lp = lg - (lg.max(-1, keepdims=True) + np.log(np.exp(lg - lg.max(-1, keepdims=True)).sum(-1, keepdims=True)))
+            cand = (ascore[:, None] + lp).reshape(-1); top = np.argpartition(-cand, 2 * B)[: 2 * B]; top = top[np.argsort(-cand[top])]
+            new_alive, new_score, parents = [], [], []
+            for rank, c in enumerate(top):
+                bi, vi = divmod(int(c), lp.shape[1]); tokid = int(self.keep[vi])
+                if tokid == 2:
+                    if rank < B and ascore[bi] > -1e8: fin.append((float(cand[c]) / ((len(alive[bi]) + 1) ** self.lp), alive[bi] + [2]))
+                else:
+                    if len(new_alive) < B and ascore[bi] > -1e8: new_alive.append(alive[bi] + [tokid]); new_score.append(float(cand[c])); parents.append(bi)
+            if not new_alive: break
+            while len(new_alive) < B: new_alive.append(new_alive[-1]); new_score.append(-1e9); parents.append(parents[-1])
+            alive = new_alive; ascore = np.array(new_score); sk = sk[:, parents]; sv = sv[:, parents]; cur = np.array([x[-1] for x in alive], np.int32)
+            if len(fin) >= B:
+                best_alive = ascore.max() / ((len(alive[0]) + 1) ** self.lp)
+                if best_alive <= min(f[0] for f in sorted(fin, reverse=True)[:B]): break
+        self.calls += 1
+        if fin: body = max(fin, key=lambda f: f[0])[1]; return body, True
+        return alive[int(ascore.argmax())], False

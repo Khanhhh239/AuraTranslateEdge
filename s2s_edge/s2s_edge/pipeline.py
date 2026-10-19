@@ -3,6 +3,7 @@
 import time
 import numpy as np
 from .audio import SR, segment
+from .names import NameTransliterator
 
 
 class Translator:
@@ -10,13 +11,16 @@ class Translator:
         self.r = registry; self.src, self.tgt = src, tgt
         self.asr = registry.asr(src); self.mt = registry.mt(); self.tts = registry.tts(tgt)
         self.graphs = [registry.graph(k) for k in registry.components_for(src, tgt)]
+        self.names = NameTransliterator(self.mt, registry.glossary)
 
     def _gtime(self): return sum(g.total_s for g in self.graphs), sum(g.calls for g in self.graphs)
 
     def translate_segment(self, wav):
         t = {}; g0, c0 = self._gtime(); a = time.perf_counter()
         text = self.asr(wav); b = time.perf_counter(); t["asr_s"] = b - a
-        mt_text = self.mt(text, self.src, self.tgt) if text.strip() else ""; c = time.perf_counter(); t["mt_s"] = c - b
+        mt_text = self.mt(text, self.src, self.tgt) if text.strip() else ""
+        if self.tgt in ("zh", "ko") and mt_text: mt_text = self.names(mt_text, self.tgt)       # Latin names -> target script (zh / ko TTS cannot read Latin)
+        c = time.perf_counter(); t["mt_s"] = c - b
         out, sr = self.tts.synthesize(mt_text) if mt_text.strip() else (np.zeros(0, np.float32), self.tts.sr); d = time.perf_counter(); t["tts_s"] = d - c
         g1, c1 = self._gtime(); t["total_s"] = d - a; t["graph_s"] = g1 - g0; t["graph_calls"] = c1 - c0; t["host_s"] = t["total_s"] - t["graph_s"]
         t["audio_in_s"] = len(wav) / SR; t["audio_out_s"] = len(out) / sr
