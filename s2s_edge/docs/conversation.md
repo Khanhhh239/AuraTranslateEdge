@@ -27,7 +27,22 @@ Measured on FLEURS test read speech (30 clips per language, `tools/lid_features.
 | en / zh / ko from the script of SenseVoice(auto) text | **90 / 90** correct |
 | Margin of a single threshold (`conf_nb`) | thin: vi ≥ 0.765, others ≤ 0.753, which is why the six-feature model is used |
 
-Not yet measured (honest list): short utterances (2–4 s), noisy speech, and a speaker of another language whose utterance contains Vietnamese loanwords.
+Held-out clips (10 per language, not used to fit the model, `tools/lid_robust.py`):
+
+| Condition | vi recognised | en / zh / ko never called Vietnamese |
+|---|---|---|
+| full clip | 10 / 10 | yes (max probability 0.12) |
+| 3 s crop | 10 / 10 | yes (0.26) |
+| 1.5 s crop | 6 / 10 | yes (0.10) |
+| 3 s + babble at 5 dB | 7 / 10 | yes (0.08) |
+
+Errors are one-sided: very short or noisy Vietnamese can be missed (a positive `bias` does not recover them), foreign speech is never taken for Vietnamese.
+The segmenter therefore merges pauses shorter than 1.5 s around short segments, and fragments without intelligible text are dropped instead of translated.
+
+Integration test, one recording with six turns (vi, ko, vi, en, vi, zh) in `--auto` mode (`samples/mixed_conversation.wav`): all six turns were routed correctly
+(vi→en with the default partner, ko→vi, vi→ko after the Korean turn, en→vi, vi→en after the English turn, zh→vi).
+
+Not yet measured: real conversational utterances (this test uses read speech), and Vietnamese loanwords inside foreign speech.
 `tools/lid_features.py` collects the features; `LanguageID(bias=...)` shifts the decision if the field test shows a systematic error.
 
 ## 2. Proper names

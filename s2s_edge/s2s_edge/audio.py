@@ -44,15 +44,18 @@ def normalize_level(x, target_peak=0.5, below=0.2):
     return (x * (target_peak / pk)).astype(np.float32) if 1e-5 < pk < below else x
 
 
-def segment(x, sr=SR, max_s=12.0, min_s=0.3, frame_ms=20, pad_ms=150, min_sil_ms=500, merge_gap_s=1.0, short_s=3.0):
+def segment(x, sr=SR, max_s=12.0, min_s=0.3, frame_ms=20, pad_ms=150, min_sil_ms=500, merge_gap_s=1.5, short_s=3.0):
     """Split a recording into utterances at pauses. Adaptive threshold from the quietest 10% of frames (works with fan noise).
     Segments longer than max_s are cut at the quietest frame in their last 40% (never mid-word if a pause exists).
     Returns a list of (start_sample, end_sample)."""
     n = int(sr * frame_ms / 1000); nf = len(x) // n
     if nf == 0: return []
-    e = np.sqrt((x[:nf * n].reshape(nf, n) ** 2).mean(1) + 1e-12); floor = np.percentile(e, 10); ceil = np.percentile(e, 95)
-    if ceil < 3e-5: return []                                                    # digital silence
-    thr = max(floor * 2.5, floor + 0.12 * (ceil - floor), 2e-5)                  # relative to the recording level: quiet microphones (rms ~ 5e-4) work too
+    from scipy.ndimage import maximum_filter1d, minimum_filter1d, uniform_filter1d
+    e = np.sqrt((x[:nf * n].reshape(nf, n) ** 2).mean(1) + 1e-12)
+    if np.percentile(e, 95) < 3e-5: return []                                    # digital silence
+    es = uniform_filter1d(e, 3)
+    ceil = maximum_filter1d(es, int(3.0 * 1000 / frame_ms)); floor = np.maximum(minimum_filter1d(es, int(6.0 * 1000 / frame_ms)), 1e-6)   # LOCAL level: speakers at different distances / volumes
+    thr = np.maximum.reduce([floor * 2.5, floor + 0.12 * (ceil - floor), np.full_like(e, 2e-5)])
     voiced = e > thr; k = max(1, int(min_sil_ms / frame_ms)); out = []; i = 0
     while i < nf:
         if not voiced[i]: i += 1; continue

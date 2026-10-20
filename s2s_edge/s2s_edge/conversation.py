@@ -25,8 +25,19 @@ def script_lang(text):
 class Engine:
     """Shared models for all directions (loaded lazily): ASR per language, one MT, TTS per language."""
 
-    def __init__(self, registry):
-        self.r = registry; self._asr = {}; self._tts = {}; self._mt = None; self.names = None
+    def __init__(self, registry, denoise=False):
+        self.r = registry; self._asr = {}; self._tts = {}; self._mt = None; self.names = None; self.denoise = denoise; self._den = None
+
+    def prep(self, wav):
+        """Level normalisation (+ optional GTCRN speech enhancement on the CPU) before ASR."""
+        if self.denoise:
+            if self._den is None:
+                import os
+                from .denoise import Gtcrn
+                from .registry import ASSETS
+                self._den = Gtcrn(os.path.join(ASSETS, "gtcrn_dns3.onnx"))
+            wav = self._den(wav)
+        return normalize_level(wav)
 
     def asr(self, lang):
         if lang not in self._asr: self._asr[lang] = self.r.asr(lang)
@@ -45,13 +56,14 @@ class Engine:
 
     def gtime(self, graphs): return sum(g.total_s for g in graphs), sum(g.calls for g in graphs)
 
-    def translate_segment(self, wav, src, tgt, text=None):
+    def translate_segment(self, wav, src, tgt, text=None, prepped=False):
         """text: pre-computed ASR text (language identification already ran the ASR)."""
-        wav = normalize_level(wav); gr = self.graphs_for(src, tgt); g0, c0 = self.gtime(gr); t = {}; a = time.perf_counter()
+        wav = wav if prepped else self.prep(wav); gr = self.graphs_for(src, tgt); g0, c0 = self.gtime(gr); t = {}; a = time.perf_counter()
         if text is None: text = self.asr(src)(wav)
         for pat, rep in (self.r.glossary.get("_asr_fix", {}).get(src, {}) or {}).items():      # domain fixes: how the ASR (mis)spells a term -> the term
             text = re.sub(pat, rep, text, flags=re.IGNORECASE)
         b = time.perf_counter(); t["asr_s"] = b - a
+        if len(re.sub(r"[\W_]+", "", text)) < 2: text = ""                                 # nothing intelligible (noise, breath, a lone "I.")
         mt_text = self.mt(text, src, tgt) if text.strip() else ""
         if tgt in ("zh", "ko") and mt_text: mt_text = self.names(mt_text, tgt)
         c = time.perf_counter(); t["mt_s"] = c - b; tts = self.tts(tgt)
@@ -88,8 +100,8 @@ class LanguageID:
 
 
 class Conversation:
-    def __init__(self, registry, pair=None, auto=False, partner="en"):
-        self.e = Engine(registry); self.lid = LanguageID(self.e); self.auto = auto; self.partner = partner
+    def __init__(self, registry, pair=None, auto=False, partner="en", denoise=False):
+        self.e = Engine(registry, denoise); self.lid = LanguageID(self.e); self.auto = auto; self.partner = partner
         self.others = [l for l in (pair or ("vi", partner)) if l != "vi"] if not auto else ["en", "zh", "ko"]
         if not auto: self.partner = self.others[0]
 
@@ -98,12 +110,13 @@ class Conversation:
         asr_vi = self.e.asr("vi"); text = asr_vi(wav); st = dict(asr_vi.stats)
         if self.lid.is_vi(st): return "vi", self.partner, text, st
         src, text = self.lid.other(wav, self.others)                   # auto mode: SenseVoice text is reused, no second pass
-        if self.auto: self.partner = src
+        if self.auto and text and len(re.sub(r"[\W_]+", "", text)) >= 3: self.partner = src       # junk fragments must not change the partner language
         return src, "vi", text, st
 
     def translate(self, wav, max_seg_s=12.0):
         out = []
         for a, b in segment(wav, max_s=max_seg_s):
-            seg = normalize_level(wav[a:b]); src, tgt, text, st = self.route(seg); r = self.e.translate_segment(seg, src, tgt, text=text)
-            r["span"] = (a / SR, b / SR); r["lid"] = st; out.append(r)
+            seg = self.e.prep(wav[a:b]); src, tgt, text, st = self.route(seg); r = self.e.translate_segment(seg, src, tgt, text=text, prepped=True)
+            r["span"] = (a / SR, b / SR); r["lid"] = st
+            if r["mt"]: out.append(r)
         return out

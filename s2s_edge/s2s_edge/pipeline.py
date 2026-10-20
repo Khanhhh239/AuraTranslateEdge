@@ -6,8 +6,8 @@ from .conversation import Engine
 
 
 class Translator:
-    def __init__(self, registry, src, tgt):
-        self.r = registry; self.src, self.tgt = src, tgt; self.e = Engine(registry)
+    def __init__(self, registry, src, tgt, denoise=False):
+        self.r = registry; self.src, self.tgt = src, tgt; self.e = Engine(registry, denoise)
         self.asr = self.e.asr(src); self.mt = self.e.mt; self.tts = self.e.tts(tgt)
         self.graphs = self.e.graphs_for(src, tgt)
 

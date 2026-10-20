@@ -22,6 +22,7 @@ def main():
     ap.add_argument("--in", dest="inp")
     ap.add_argument("--out", default="out.wav")
     ap.add_argument("--no-play", action="store_true")
+    ap.add_argument("--denoise", action="store_true", help="GTCRN speech enhancement (CPU) before ASR")
     ap.add_argument("--continuous", action="store_true", help="live mode without pressing Enter: always listening, translate and speak after each utterance")
     a = ap.parse_args()
     reg = Registry(a.models, a.backend, a.glossary)
@@ -29,10 +30,10 @@ def main():
         from .conversation import Conversation
         pr = tuple(a.pair.split(",")) if a.pair else None
         if pr and "vi" not in pr: sys.exit("one language of the pair must be vi")
-        tr = Conversation(reg, pair=pr, auto=a.auto, partner=a.partner); label = "auto" if a.auto else a.pair
+        tr = Conversation(reg, pair=pr, auto=a.auto, partner=a.partner, denoise=a.denoise); label = "auto" if a.auto else a.pair
     else:
         if not a.src or not a.tgt or (a.src, a.tgt) not in DIRECTIONS: sys.exit(f"give --src/--tgt (one side must be vi), or --pair / --auto. Supported: {DIRECTIONS}")
-        tr = Translator(reg, a.src, a.tgt); label = f"{a.src}->{a.tgt}"
+        tr = Translator(reg, a.src, a.tgt, denoise=a.denoise); label = f"{a.src}->{a.tgt}"
     if a.cmd == "file":
         res = tr.translate(load_audio(a.inp))
         for r in res:
