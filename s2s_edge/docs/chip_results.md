@@ -16,6 +16,18 @@ They are *not* on-device end-to-end measurements; those are produced by `python 
 | `tts_zh` MeloTTS-ZH + static front + BERT | zh TTS | `jpy8mw17g` / `j5wyy4jmg`; profile `j5m9m9e9g`, infer `jgn1n10qp` | 3451 / 3451 | **720.2 ms** (fixed, 384 frames) | ASR CER 6.4 % on 40 texts (CPU: 6.0 %) |
 | `tts_enko` Supertonic-3 fused | en/ko TTS | `jprxn9nep` / `jg9ood68g`; profile `jpe6l2l0g`, infer `jgzz4w46g` | 4476 / 4476 | 748.3 ms (fixed, 150 latent frames) | round trip WER 0.0 % (en), CER 1.5 % (ko), 6 sentences each |
 
+## Same graphs re-linked for QCS8550 (HSPTEK AIBOX 8550), profiled on the hosted "QCS8550 (Proxy)" (09/11/2026)
+
+`tools/relink_device.py` (link jobs in the package `models_qcs8550/link_jobs.json`, QAIRT 2.51) + `tools/profile_links.py`. All 9 context binaries load and run on QCS8550.
+
+| Graph | QCS8550 chip time per call | IQ-9075 | Profile job |
+|---|---|---|---|
+| asr_vi | 163.4 ms | 174.3 ms | `jgl8z82ep` |
+| asr_xx frontend / encoder | 58.3 / 236.5 ms | 62.5 / 268.0 ms | `jp37371xg` / `jpvmomr7p` |
+| mt_enc | 7.5 ms | 7.4 ms | `jgjymy27g` |
+| mt_dec / mt_decB per step | 15.2 / 30.8 ms | 16.1 / 31.0 ms | `jpex1xw7g` / `jp11l1wkp` |
+| tts_vi / tts_zh / tts_enko | 520.1 / 740.6 / 701.2 ms | 480 / 720.2 / 748.3 ms | `j57nwnlqp` / `jp44o4dqp` / `jpxrjr6jp` |
+
 ## Estimated chip time per utterance (sum of the profiles above; an *estimate*, not an end-to-end measurement)
 
 MT = encoder 7 ms + ~25 decoder steps: beam search 25 × 31 ≈ 0.8 s (default), greedy 25 × 16 ≈ 0.4 s (`models_fast.json`).

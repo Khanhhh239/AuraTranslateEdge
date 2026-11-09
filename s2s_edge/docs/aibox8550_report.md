@@ -11,12 +11,12 @@ Cách đọc: **[đo]** là số đã đo, **[ước tính]** là số tính t�
 
 | Câu hỏi | Trả lời ngắn |
 |---|---|
-| Model có hợp chip QCS8550 không? | Hợp về kiến trúc: QCS8550 cũng là Hexagon v73, cùng thế hệ với IQ-9075 mà mọi graph đã được biên dịch và chạy trên đó **[đo qua AI Hub]**. File context binary `.bin` có gắn thông tin SoC, nên cần **link lại cho "QCS8550 (Proxy)"**. Thiết bị này có trên AI Hub, và cả 9 graph đã tìm lại được model đã biên dịch (`tools/relink_device.py --dry_run` chạy thành công). Không phải biên dịch hay sửa graph. |
+| Model có hợp chip QCS8550 không? | **Có, đã kiểm chứng trên chip.** 9 graph đã được link lại cho "QCS8550 (Proxy)" với QAIRT 2.51, và cả 9 **nạp và chạy được trên QCS8550 của AI Hub** (profile job), thời gian gần như IQ-9075 (bảng ở mục 1.4). Không phải biên dịch hay sửa graph. Bộ `.bin` mới nằm trong gói ở `models_qcs8550/`. |
 | Gói cài có chạy trên hệ điều hành của hộp không? | Phụ thuộc OS. Ubuntu 24.04 (Python 3.12) và Ubuntu 22.04 (Python 3.10, glibc 2.35) đều có wheel `qai_appbuilder 2.51.40` chính thức; cả hai đã nằm trong gói. **Ubuntu 20.04 (Python 3.8, glibc 2.31) thì không**: phải chạy trong container (`tools/docker_run.sh`) hoặc nạp lại Ubuntu 22.04. |
-| Chất lượng trên dữ liệu BTC? | vi→en, 30 câu **[đo, CPU, cùng trọng số với bản NPU]**: WER ASR 0,8%, chrF 53,8 → **55,6** sau khi thêm bộ khôi phục dấu câu (dịch từ văn bản chuẩn: 56,4). Bảng đủ 6 chiều ở mục 4.2. |
-| Độ trễ? | Thời gian chạy trên chip, cộng từ các phép đo từng graph **[ước tính]**: khoảng 1,2–1,7 giây cho một câu ngắn. Chưa có số đo đầu-cuối trên thiết bị thật; `tools/run_btc.sh` sẽ đo khi có máy. |
+| Chất lượng trên dữ liệu BTC? | 30 câu mỗi chiều, 6 chiều **[đo, CPU, cùng trọng số với bản NPU]**, bảng ở mục 4.2. ASR tốt (lỗi 1–6%, riêng tiếng Anh hội thoại 18%); TTS gần như không làm mất chất lượng; điểm yếu là **MT cho cặp Hàn/Trung**. Bộ khôi phục dấu câu mới tăng vi→en chrF 53,8 → 55,6 và vi→ko BLEU 23,8 → 30,0. |
+| Độ trễ? | Thời gian chip trên QCS8550 **[đo từng graph]**, cộng lại **[ước tính]**: khoảng 1,2–1,7 giây cho một câu ngắn. Chưa có số đo đầu-cuối trên thiết bị thật; `tools/run_btc.sh` sẽ đo khi có máy. |
 | Dung lượng model? | 9 file, tổng ~4,0 GB. Một chiều dịch nạp ~2,2 GB. Bản greedy bỏ được decoder beam (884 MB). |
-| Việc cần làm ngay | (1) Link lại cho QCS8550; (2) mang theo gói + dữ liệu + USB mic/loa; (3) trên máy: `recon.sh` → `install.sh` → `session0.sh` → `run_btc.sh`. |
+| Việc cần làm ngay | (1) mang theo gói (8,2 GB: bộ `.bin` QCS8550 + bộ IQ-9075 dự phòng) + dữ liệu + USB mic/loa; (2) trên máy: `recon.sh` → `install.sh` → `session0.sh` (tự chọn bộ model nạp được) → `run_btc.sh`. |
 
 ---
 
@@ -58,9 +58,22 @@ Lý do cả ba phiên bản Ubuntu đều dùng **QAIRT 2.51**: các file `.bin`
 
 ### 1.4 Context binary cho QCS8550
 - `.bin` của IQ-9075 **có thể** nạp được trên QCS8550 vì cùng v73, nhưng tài liệu QNN liệt kê QCS8550 và SM8550 với *SoC model* khác nhau. Không nên đánh cược vào việc này.
-- Cách làm: `python tools/relink_device.py --device "QCS8550 (Proxy)" --qairt 2.51 --out models_qcs8550 --dlc`. Lệnh này gửi 9 link job từ đúng các model đã biên dịch, tải `.bin` mới, và tải thêm `.dlc` làm dự phòng.
-- Thứ tự thử trên máy: `.bin` QCS8550 → `.bin` IQ-9075 → `.dlc` (thiết bị tự chuẩn bị graph ở lần nạp đầu, chậm nhưng không phụ thuộc SoC).
-- Ghi chú: "QCS8550 (Proxy)" trên AI Hub là máy Android. Nó dùng để tạo file cho SoC này, không phải chính chiếc AIBOX.
+- **Đã làm (09/11):** `python tools/relink_device.py --device "QCS8550 (Proxy)" --qairt 2.51 --out models_qcs8550 --dlc` gửi 9 link job (id trong `models_qcs8550/link_jobs.json`) từ đúng các model đã biên dịch, tải 9 `.bin` (tổng 4,0 GB) và 9 `.dlc` dự phòng (tổng 7,9 GB, **không** nằm trong gói chính vì quá lớn; để riêng trong `s2s_pkg/models_qcs8550/`).
+- **Kiểm chứng trên chip** (`tools/profile_links.py`, profile job trên QCS8550 của AI Hub), thời gian mỗi lần gọi graph **[đo]**:
+
+| Graph | QCS8550 | IQ-9075 | Bộ nhớ đỉnh QCS8550 |
+|---|---|---|---|
+| ASR vi Zipformer (cửa sổ 15 s) | 163,4 ms | 174,3 ms | 95 MB |
+| SenseVoice frontend / encoder (cửa sổ 29 s) | 58,3 / 236,5 ms | 62,5 / 268,0 ms | 93 / 95 MB |
+| NLLB encoder (64 token) | 7,5 ms | 7,4 ms | 99 MB |
+| NLLB decoder bước greedy / beam 4 | 15,2 / 30,8 ms | 16,1 / 31,0 ms | 132 / 216 MB |
+| TTS vi Piper | 520,1 ms | 480 ms | 95 MB |
+| TTS zh Melo | 740,6 ms | 720,2 ms | 92 MB |
+| TTS en/ko Supertonic | 701,2 ms | 748,3 ms | 96 MB |
+
+  Profile job id: asr_vi `jgl8z82ep`, frontend `jp37371xg`, encoder `jpvmomr7p`, mt_enc `jgjymy27g`, mt_dec `jpex1xw7g`, mt_decB `jp11l1wkp`, tts_vi `j57nwnlqp`, tts_zh `jp44o4dqp`, tts_enko `jpxrjr6jp`.
+- Thứ tự thử trên máy (`session0.sh` làm tự động, ghi bộ chọn được vào `logs/models_ok.txt`): `models_qcs8550/` → `models/` (IQ-9075) → `.dlc` (sửa `"ctx"` trong `models.json` bằng tay; thiết bị tự chuẩn bị graph ở lần nạp đầu, chậm nhưng không phụ thuộc SoC).
+- Ghi chú: "QCS8550 (Proxy)" trên AI Hub là máy **Android** có chip QCS8550. Nó chứng minh file nạp được trên chip này; còn hệ điều hành Linux của AIBOX vẫn phải kiểm tra tại chỗ (mục 1.3).
 
 ---
 
@@ -78,7 +91,7 @@ Lý do cả ba phiên bản Ubuntu đều dùng **QAIRT 2.51**: các file `.bin`
 Những gì dữ liệu cho thấy về bộ test ẩn:
 1. **Câu rất ngắn, mang tính hội thoại** (trung vị 2–3 s). Độ trễ cố định của TTS (cửa sổ tĩnh) chiếm phần lớn thời gian. Câu hỏi rất nhiều (174/431 câu tiếng Việt là câu hỏi).
 2. **Định dạng audio không đồng nhất.** Bộ nạp phải tự đọc MP3 và resample. `soundfile` bản aarch64 đọc được MP3; `eval_btc.py` có thêm đường dự phòng qua `ffmpeg`.
-3. **Nhãn có lỗi.** Có câu tiếng Việt mang dấu vết ASR ("Mát mê", "Ống hục ở đâu?"), có cặp lệch nghĩa (VK-0242: "Xe buýt có máy lạnh không?" ↔ "베트남어 가이드가 있나요?"), và VK-9110 có câu tiếng Hàn lặp vô hạn. `eval_btc.py` tự đánh dấu các câu bất thường và cho điểm trên cả tập đầy đủ lẫn tập sạch. Điểm tuyệt đối trên bộ này sẽ thấp hơn trên FLORES; nên dùng nó để **so sánh các phiên bản với nhau**.
+3. **Nhãn và audio có lỗi.** Có câu tiếng Việt mang dấu vết ASR ("Mát mê", "Ống hục ở đâu?"), có cặp lệch nghĩa (VK-0242: "Xe buýt có máy lạnh không?" ↔ "베트남어 가이드가 있나요?"), VK-9110 có câu tiếng Hàn lặp vô hạn, một nhãn tiếng Việt bộ Việt-Trung chỉ ghi đoạn cuối của câu nói ("Được điểm tối đa." cho một câu dài 6,9 s), và file EV-2748 gần như câm (76% mẫu bằng 0, đỉnh 0,007). `eval_btc.py` tự đánh dấu các câu bất thường và cho điểm trên cả tập đầy đủ lẫn tập sạch. Điểm tuyệt đối trên bộ này sẽ thấp hơn trên FLORES; nên dùng nó để **so sánh các phiên bản với nhau**.
 4. Tham chiếu tiếng Việt của chiều Anh→Việt **viết số bằng chữ**, nên khi chấm phải chuẩn hóa số ở cả hai phía (`textnorm.normalize`).
 
 ---
@@ -86,15 +99,17 @@ Những gì dữ liệu cho thấy về bộ test ẩn:
 ## 3. Cách chạy trên thiết bị thật
 
 ### 3.1 Chuẩn bị trên laptop (trước khi đến VNG)
+Gói hiện tại `s2s_pkg/dist/s2s_edge_pkg` (8,2 GB) **đã có đủ**: code, `models_qcs8550/` (link 09/11, đã profile trên QCS8550), `models/` (IQ-9075), `wheelhouse/` (py3.12), `wheelhouse_cp310/` (py3.10), tài liệu. Chỉ cần làm lại các lệnh dưới khi đổi model:
 ```bash
-# 1. link lại cho QCS8550 (khoảng 10-30 phút trên AI Hub)
+# 1. link lại cho QCS8550 (đã làm 09/11; khoảng 10-30 phút trên AI Hub) và profile trên chip
 python tools/relink_device.py --device "QCS8550 (Proxy)" --qairt 2.51 --out models_qcs8550 --dlc
+python tools/profile_links.py --links models_qcs8550/link_jobs.json --device "QCS8550 (Proxy)" --out models_qcs8550/profile.json
 # 2. dựng gói: code + models + 2 wheelhouse (py3.12 và py3.10)
 python tools/build_package.py --models-dir <models> --wheelhouse <wheelhouse_cp312> --wheelhouse310 <wheelhouse_cp310> --out dist/s2s_edge_pkg
 # 3. (chỉ khi hộp chạy Ubuntu 20.04) image container dự phòng
 docker pull --platform linux/arm64 python:3.10-slim-bookworm && docker save -o py310_arm64.tar python:3.10-slim-bookworm
 ```
-Mang theo: ổ USB ≥ 16 GB (gói 4,6 GB + dữ liệu BTC 143 MB + `py310_arm64.tar`), USB mic + USB loa, cáp LAN, cáp USB-C/micro-USB (cho adb/serial), bàn phím.
+Mang theo: ổ USB ≥ 16 GB (gói 8,2 GB + dữ liệu BTC 143 MB + `py310_arm64.tar`; nếu cần thêm bộ `.dlc` 7,9 GB thì dùng ổ 32 GB), USB mic + USB loa, cáp LAN, cáp USB-C/micro-USB (cho adb/serial), bàn phím.
 
 ### 3.2 Trên hộp (theo thứ tự, mỗi bước có log)
 ```bash
@@ -103,10 +118,10 @@ rsync -avP s2s_edge_pkg/ <user>@192.168.10.2:~/s2s_edge_pkg/
 cd ~/s2s_edge_pkg
 bash tools/recon.sh            # 1-2 phút: OS, glibc, Python, FastRPC, thư viện QNN, audio, USB, Docker
 bash install.sh                # tự chọn wheelhouse theo Python; báo rõ nếu phải dùng container
-bash tools/session0.sh         # golden check từng graph, smoke test vi->en / en->vi, benchmark; đóng gói log .tgz
-bash tools/run_btc.sh ~/onevoice_btc_data 30     # 30 câu mỗi chiều (đổi 0 = toàn bộ ~920 câu)
+bash tools/session0.sh         # golden check từng graph (thử models_qcs8550 rồi models), smoke test, benchmark; đóng gói log .tgz
+bash tools/run_btc.sh ~/onevoice_btc_data 30     # 30 câu mỗi chiều (đổi 0 = toàn bộ ~920 câu); dùng bộ model session0 đã chọn
 ```
-Nếu `.bin` bị từ chối: sửa `models/models.json` cho trỏ tới `.bin` IQ-9075, hoặc `.dlc` (khóa `"ctx"`), rồi chạy lại `golden.py check`.
+Nếu cả hai bộ `.bin` đều bị từ chối: chép bộ `.dlc` vào một thư mục, sửa khóa `"ctx"` trong `models.json` cho trỏ tới `.dlc`, rồi `MODELS=<thư mục>/models.json bash tools/session0.sh`.
 
 ### 3.3 Demo và quay video (yêu cầu của BTC: tắt mạng)
 ```bash
@@ -131,16 +146,21 @@ Ghép model: mỗi khối cam là một graph QNN tĩnh trên NPU; phần việc
 ### 4.2 Kết quả trên dữ liệu BTC (30 câu mỗi chiều, CPU, cùng trọng số với bản NPU)
 `tools/eval_btc.py`, log: `logs/btc_cpu30*.json` và `.csv` (từng câu).
 
-| Chiều | Lỗi ASR nguồn | MT từ văn bản chuẩn (chrF / BLEU) | Đầu-cuối: ASR của audio đầu ra (chrF / BLEU) |
-|---|---|---|---|
-| vi→en | WER 0,8% | 56,4 / 38,9 | 53,9 / 34,0 (trước khi thêm dấu câu); **MT từ ASR sau khi thêm: 55,6 / 37,8** |
-| en→vi | _đang chạy_ | | |
-| vi→ko | _đang chạy_ | | |
-| ko→vi | _đang chạy_ | | |
-| vi→zh | _đang chạy_ | | |
-| zh→vi | _đang chạy_ | | |
+Lỗi ASR tính trên toàn tập (tổng lỗi / tổng độ dài nhãn). Điểm tính trên tập sạch (bỏ câu có nhãn hỏng; số câu trong ngoặc). Tóm tắt lại bất cứ lúc nào bằng: `python tools/eval_btc.py --summarize logs/btc_cpu30*.json`.
 
-Thời gian đo trên laptop (CPU fp32, ~30 s/câu) **không phải** độ trễ thiết bị; số thật sẽ do `run_btc.sh` đo trên NPU.
+| Chiều | n (sạch) | Lỗi ASR nguồn | MT từ văn bản chuẩn chrF / BLEU | MT từ ASR chrF / BLEU | Đầu-cuối (ASR của audio ra) chrF / BLEU |
+|---|---|---|---|---|---|
+| vi→en | 30 (30) | WER 0,8% | 56,4 / 38,9 | 53,8 / 33,9 → **55,6 / 37,8** với `vi_punct` | 53,9 / 34,0 (chưa có `vi_punct`) |
+| en→vi | 30 (30) | WER 17,8% | 58,3 / 36,6 | 53,0 / 34,1 | 50,3 / 32,3 |
+| vi→ko | 30 (30) | WER 5,8% | 33,0 / 34,6 | 24,1 / 23,8 → **25,7 / 30,0** với `vi_punct` | 21,6 / 21,8 (chưa có `vi_punct`) |
+| ko→vi | 30 (30) | CER 1,0% | 39,8 / 19,0 | 35,1 / 14,9 | 34,4 / 14,4 |
+| vi→zh | 30 (29) | WER 4,9% | 37,7 / 44,7 | 32,4 / 39,2 (có `vi_punct`) | 31,5 / 38,1 |
+| zh→vi | 30 (30) | CER 2,5% | 50,6 / 29,3 | 50,3 / 29,7 | 50,3 / 29,7 |
+
+Nhận xét:
+- **Bản dịch đọc ra nghe lại gần như khớp văn bản dịch** (cột cuối thấp hơn cột "MT từ ASR" chỉ 0–3 điểm), nên TTS không phải là chỗ mất chất lượng. Phần mất nằm ở **MT** (vi→ko, ko→vi, vi→zh thấp ngay cả khi dịch từ văn bản chuẩn) và ở **ASR tiếng Anh hội thoại** (en→vi: từ đệm "um/uh", nói nhanh; có 1 file hỏng là EV-2748, 76% mẫu bằng 0).
+- chrF của tiếng Hàn/Trung thấp một phần do cách tính trên ký tự; BLEU tiếng Trung tính theo ký tự nên cao hơn. So sánh theo **chênh lệch giữa các phiên bản**, không theo giá trị tuyệt đối.
+- Thời gian đo trên laptop (CPU fp32, 30–60 s/câu) **không phải** độ trễ thiết bị. Thời gian chip trên QCS8550 ở mục 1.4; số đầu-cuối thật sẽ do `run_btc.sh` đo trên NPU.
 
 ### 4.3 Các bước đã làm để tăng chất lượng (đều đã đo)
 | Bước | Tác dụng đo được |
@@ -150,7 +170,8 @@ Thời gian đo trên laptop (CPU fp32, ~30 s/câu) **không phải** độ tr�
 | Chặn lặp 3-gram + giới hạn độ dài | bỏ được lỗi lặp vô hạn |
 | VAD theo mức cục bộ | en→vi chrF 19 → 47 trên mic nhỏ tiếng |
 | TTS tự chia lại văn bản khi đầy cửa sổ tĩnh | hết hiện tượng mất đuôi câu (Melo, Supertonic) |
-| **Mới:** khôi phục dấu câu tiếng Việt (`textnorm.vi_punct`) trước MT | đúng 97,0% dấu cuối câu trên 431 câu BTC (nhận ra 169/174 câu hỏi); trên FLORES (không dùng để chỉnh luật) nhầm 6/126 câu kể; vi→en chrF 53,8 → 55,6, BLEU 33,9 → 37,8. *Luật được chỉnh trên chính bộ BTC, nên mức tăng trên bộ test ẩn có thể nhỏ hơn.* |
+| **Mới:** khôi phục dấu câu tiếng Việt (`textnorm.vi_punct`) trước MT | đúng 97,0% dấu cuối câu trên 431 câu BTC (nhận ra 169/174 câu hỏi); trên FLORES (không dùng để chỉnh luật) nhầm 6/126 câu kể; vi→en chrF 53,8 → 55,6, BLEU 33,9 → 37,8; vi→ko chrF 24,1 → 25,7, BLEU 23,8 → 30,0. *Luật được chỉnh trên chính bộ BTC, nên mức tăng trên bộ test ẩn có thể nhỏ hơn.* |
+| Thử và **bỏ**: sửa dấu cách trong ASR tiếng Hàn (SenseVoice tách "있 어요", "시 간") | ko→vi chrF: giữ nguyên 35,1; bỏ hết dấu cách 34,9; luật nối đuôi/trợ từ 33,6. Không cách nào tốt hơn, nên không đưa vào |
 | **Mới:** ASR không còn crash với đoạn audio < 100 ms | lỗi tìm ra khi chạy bộ BTC (cũng sẽ xảy ra khi nói rất ngắn trên máy thật) |
 | Tên riêng: Piper đọc tên nước ngoài bằng âm tiết Việt; zh/ko phiên âm qua NLLB | không còn mất từ khi đọc |
 
@@ -197,9 +218,12 @@ Chỉ cần một chế độ thì giữ một decoder (bỏ 884 MB): `models_fa
 
 | File | Việc |
 |---|---|
-| `tools/eval_btc.py` | chạy bộ BTC: đọc Excel, MP3, chấm ASR / MT / đầu-cuối / độ trễ, xuất CSV + JSON |
+| `tools/eval_btc.py` | chạy bộ BTC: đọc Excel, MP3, chấm ASR (toàn tập) / MT / đầu-cuối / độ trễ, đánh dấu nhãn hỏng, xuất CSV + JSON; `--summarize` in bảng từ log đã lưu |
 | `tools/run_btc.sh` | chạy 6 chiều trên NPU, đóng gói log |
 | `tools/relink_device.py` | link lại 9 graph cho thiết bị v73 khác (QCS8550), tải `.bin` + `.dlc` |
+| `tools/profile_links.py` | profile các `.bin` mới trên chip của AI Hub (chứng minh nạp được + thời gian chip) |
+| `tools/session0.sh` | thử lần lượt các bộ model đến khi mọi graph qua golden check, ghi bộ chọn được vào `logs/models_ok.txt` |
+| `tools/golden.py` | graph lỗi không làm dừng các graph khác; trả mã lỗi khác 0 khi có graph hỏng |
 | `tools/docker_run.sh` | chạy gói trong container khi OS quá cũ, có truyền FastRPC + USB audio |
 | `tools/recon.sh` | thêm kiểm tra glibc, venv, Docker, thiết bị USB |
 | `tools/build_package.py` | `install.sh` mới: tự chọn wheel theo Python, báo lỗi rõ ràng; thêm `--wheelhouse310` |

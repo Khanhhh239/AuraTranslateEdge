@@ -77,10 +77,49 @@ def scores(hyps, refs, lang):
     return dict(chrF=round(sacrebleu.corpus_chrf(H, [R]).score, 2), BLEU=round(sacrebleu.corpus_bleu(H, [R], tokenize=tok).score, 2))
 
 
-ap = argparse.ArgumentParser(); ap.add_argument("--data", required=True); ap.add_argument("--models", required=True); ap.add_argument("--backend", default="npu")
+def corpus_err(rows, lang):
+    """Corpus-level WER / CER (total edits / total reference length): one mislabelled clip cannot dominate it the way a mean of per-clip rates does."""
+    R = [norm_text(x["src_text"], lang) for x in rows]; H = [norm_text(x["asr"], lang) for x in rows]
+    keep = [i for i, r in enumerate(R) if r]
+    if not keep: return None
+    R, H = [R[i] for i in keep], [H[i] or "_" for i in keep]
+    if lang in ("zh", "ko"): return jiwer.cer([r.replace(" ", "") for r in R], [h.replace(" ", "") for h in H])
+    return jiwer.wer(R, H)
+
+
+def flagged(x):
+    """Reference that does not fit the clip: translation pair mismatch (see suspicious) or a source label far shorter/longer than what is spoken."""
+    return x["flag"] or (x["src_err"] is not None and x["src_err"] > 1.0)
+
+
+def summarize(rows, src, tgt, heard=True):
+    summ = dict(n=len(rows))
+    for name, sub in (("all", rows), ("clean", [x for x in rows if not flagged(x)])):
+        if not sub: continue
+        refs = [x["ref"] for x in sub]; e = corpus_err(sub, src)
+        s = dict(n=len(sub), src_err=round(e, 4) if e is not None else None, mt_gold=scores([x["mt_gold"] for x in sub], refs, tgt), mt_e2e=scores([x["mt_e2e"] for x in sub], refs, tgt))
+        if heard and any(x["heard"] for x in sub): s["heard"] = scores([x["heard"] for x in sub], refs, tgt)
+        tot = [x["total_s"] for x in sub if "total_s" in x]; aud = [x["audio_s"] for x in sub]
+        if tot: s["latency"] = dict(mean_s=round(float(np.mean(tot)), 3), p50_s=round(float(np.median(tot)), 3), p90_s=round(float(np.percentile(tot, 90)), 3),
+                                    rtf=round(float(np.sum(tot) / max(np.sum(aud), 1e-6)), 3), **{k: round(float(np.mean([x[k] for x in sub if k in x])), 3) for k in ("asr_s", "mt_s", "tts_s", "graph_s")})
+        summ[name] = s
+    return summ
+
+
+ap = argparse.ArgumentParser(); ap.add_argument("--data", default=""); ap.add_argument("--models", default=""); ap.add_argument("--backend", default="npu")
 ap.add_argument("--dirs", default="vi-en,en-vi,vi-ko,ko-vi,vi-zh,zh-vi"); ap.add_argument("--n", type=int, default=0); ap.add_argument("--out", default="logs/btc.json")
 ap.add_argument("--glossary", default=None); ap.add_argument("--no_heard", action="store_true", help="skip ASR of the output audio (faster)")
-a = ap.parse_args(); sys.stdout.reconfigure(encoding="utf-8"); reg = Registry(a.models, a.backend, a.glossary); res = {}
+ap.add_argument("--summarize", nargs="+", default=None, help="recompute summaries from saved result JSON files (no models needed) and print one table")
+a = ap.parse_args(); sys.stdout.reconfigure(encoding="utf-8")
+if a.summarize:
+    print("| direction | n (clean) | src ASR err | MT gold chrF/BLEU | MT from ASR chrF/BLEU | heard chrF/BLEU |"); print("|---|---|---|---|---|---|")
+    for p in a.summarize:
+        for d, v in json.load(open(p, encoding="utf-8")).items():
+            src, tgt = d.split("-"); s = summarize(v["rows"], src, tgt); c = s.get("clean", s["all"]); f = lambda m: f"{c[m]['chrF']} / {c[m]['BLEU']}" if m in c else "-"
+            print(f"| {d} | {s['n']} ({c['n']}) | {'CER' if src in ('zh', 'ko') else 'WER'} {100 * c['src_err']:.1f} % | {f('mt_gold')} | {f('mt_e2e')} | {f('heard')} |")
+    sys.exit(0)
+if not (a.data and a.models): ap.error("--data and --models are required unless --summarize is given")
+reg = Registry(a.models, a.backend, a.glossary); res = {}
 os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
 for d in a.dirs.split(","):
     src, tgt = d.split("-"); tr = Translator(reg, src, tgt); out_asr = None if a.no_heard else reg.asr(tgt)
@@ -97,16 +136,7 @@ for d in a.dirs.split(","):
         rows.append(dict(id=it["id"], audio_s=round(len(w) / 16000, 2), src_text=it["src_text"], ref=it["ref"], asr=asr, src_err=err_rate(it["src_text"], asr, src),
                          mt_gold=mt_gold, mt_e2e=mt, heard=heard, flag=suspicious(it["src_text"], it["ref"]), **tm))
         print(f"[{d}] {it['id']} err={rows[-1]['src_err'] if rows[-1]['src_err'] is None else round(rows[-1]['src_err'], 2)} | {mt[:60]} | {tm.get('total_s')}", flush=True)
-    summ = dict(n=len(rows), seconds=round(time.time() - t0))
-    for name, sub in (("all", rows), ("clean", [x for x in rows if not x["flag"]])):
-        if not sub: continue
-        refs = [x["ref"] for x in sub]; e = [x["src_err"] for x in sub if x["src_err"] is not None]
-        s = dict(n=len(sub), src_err=round(float(np.mean(e)), 4) if e else None, mt_gold=scores([x["mt_gold"] for x in sub], refs, tgt), mt_e2e=scores([x["mt_e2e"] for x in sub], refs, tgt))
-        if out_asr is not None: s["heard"] = scores([x["heard"] for x in sub], refs, tgt)
-        tot = [x["total_s"] for x in sub if "total_s" in x]; aud = [x["audio_s"] for x in sub]
-        if tot: s["latency"] = dict(mean_s=round(float(np.mean(tot)), 3), p50_s=round(float(np.median(tot)), 3), p90_s=round(float(np.percentile(tot, 90)), 3),
-                                    rtf=round(float(np.sum(tot) / max(np.sum(aud), 1e-6)), 3), **{k: round(float(np.mean([x[k] for x in sub if k in x])), 3) for k in ("asr_s", "mt_s", "tts_s", "graph_s")})
-        summ[name] = s
+    summ = dict(summarize(rows, src, tgt, out_asr is not None), seconds=round(time.time() - t0))
     res[d] = dict(summary=summ, rows=rows); print(d, json.dumps(summ, ensure_ascii=False), flush=True)
     with open(os.path.splitext(a.out)[0] + f"_{d}.csv", "w", encoding="utf-8-sig", newline="") as f:
         wr = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else ["id"]); wr.writeheader(); wr.writerows(rows)

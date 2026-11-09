@@ -56,10 +56,18 @@ def main():
     a = ap.parse_args(); os.makedirs(GOLD, exist_ok=True); reg = Registry(a.models, "cpu" if a.mode == "make" else a.backend)
     keys = [k for k in a.only.split(",") if k] or [k for k in reg.cfg if k in ("asr_vi", "asr_xx", "asr_xx_frontend", "mt", "mt_enc", "mt_dec", "mt_decB", "tts_vi", "tts_zh", "tts_enko")]; rows = []
     for k in keys:
-        g = reg.graph(k); gp = os.path.join(GOLD, f"{k}.npz")
+        gp = os.path.join(GOLD, f"{k}.npz")
+        try: g = reg.graph(k)
+        except Exception as e:
+            if a.mode == "make": raise
+            rows.append(dict(graph=k, ok=False, error=repr(e)[:300])); print("FAIL", k, "load:", repr(e)[:300], flush=True); continue
         if a.mode == "check" and os.path.exists(gp): z = np.load(gp); ins = {n[3:]: z[n] for n in z.files if n.startswith("in_")}          # exactly the inputs used for the reference
         else: ins = inputs_for(reg, k)
-        t = time.perf_counter(); out = g(**ins); dt = time.perf_counter() - t
+        try:
+            t = time.perf_counter(); out = g(**ins); dt = time.perf_counter() - t
+        except Exception as e:                                                   # a context the runtime rejects must not hide the other graphs
+            if a.mode == "make": raise
+            rows.append(dict(graph=k, ok=False, error=repr(e)[:300])); print("FAIL", k, repr(e)[:300], flush=True); continue
         if a.mode == "make":
             np.savez_compressed(gp, **{f"in_{n}": v for n, v in ins.items()}, **{f"out_{i}": np.asarray(o) for i, o in enumerate(out)}); print("saved", gp, f"{os.path.getsize(gp)/1e6:.1f} MB"); continue
         ref = np.load(gp); status = []
@@ -69,6 +77,7 @@ def main():
         rows.append(dict(graph=k, ok=ok, outputs=status, seconds=round(dt, 3))); print(("PASS " if ok else "FAIL ") + k, status, f"{dt*1000:.0f} ms", flush=True)
     if a.mode == "check":
         os.makedirs("logs", exist_ok=True); json.dump(rows, open(f"logs/golden_{a.backend}_{time.strftime('%Y%m%d_%H%M%S')}.json", "w"), indent=1); print("all pass" if all(r["ok"] for r in rows) else "SOME FAILED")
+        sys.exit(0 if rows and all(r["ok"] for r in rows) else 1)
 
 
 if __name__ == "__main__": main()
