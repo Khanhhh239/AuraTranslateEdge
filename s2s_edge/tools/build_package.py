@@ -10,15 +10,28 @@ MAP = {"asr_vi": "asr_vi_zip150_ctc_fp16", "asr_xx_frontend": "asr_xx_sensevoice
        "mt_enc": "mt_enc_nllb_s64", "mt_dec": "mt_dec_nllb_s64", "mt_decB": "mt_decB_nllb_s64", "tts_vi": "tts_vi_piper_fullg8", "tts_zh": "tts_zh_melo_one", "tts_enko": "tts_enko_supertonic_full_v3"}
 
 INSTALL = """#!/usr/bin/env bash
-# Offline install (no network needed): Python 3.12 on Ubuntu 24.04 aarch64 (Dragonwing IQ-9075).
+# Offline install (no network needed), aarch64 Linux with a Hexagon v73 NPU (Dragonwing IQ-9075, QCS8550 boxes).
+#   wheelhouse/        Python 3.12, glibc >= 2.39 (Ubuntu 24.04)
+#   wheelhouse_cp310/  Python 3.10, glibc >= 2.35 (Ubuntu 22.04)
+# Both carry qai_appbuilder 2.51.40 = the QAIRT 2.51 runtime the context binaries in models/ were linked for.
 set -e
 cd "$(dirname "$0")"
-python3 -m venv .venv && . .venv/bin/activate
-pip install --no-index --find-links wheelhouse -r requirements.txt
-pip install --no-index --find-links wheelhouse qai_appbuilder
+PYV=$(python3 -c 'import sys; print("%d%d" % sys.version_info[:2])')
+GLIBC=$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\\.[0-9]+$' || echo 0)
+echo "python3 = $PYV, glibc = $GLIBC, arch = $(uname -m)"
+case "$PYV" in
+  312) WH=wheelhouse ;;
+  310) WH=wheelhouse_cp310 ;;
+  *)   echo "No wheelhouse for Python $PYV. Options: install python3.10/3.12 from the OS packages, or run in a container (tools/docker_run.sh)."; exit 2 ;;
+esac
+[ -d "$WH" ] || { echo "missing $WH/"; exit 2; }
+python3 -m venv .venv || { echo "python3 -m venv failed: install the python3-venv package (offline: .deb from the OS image)"; exit 2; }
+. .venv/bin/activate
+pip install --no-index --find-links "$WH" -r requirements.txt openpyxl
+pip install --no-index --find-links "$WH" qai_appbuilder || { echo "qai_appbuilder wheel rejected (glibc $GLIBC too old?). See tools/docker_run.sh"; exit 3; }
 python3 -c "import qai_appbuilder, os; print('qai_appbuilder', os.path.dirname(qai_appbuilder.__file__))"
 echo "ADSP_LIBRARY_PATH is set automatically by qai_appbuilder (bundled Hexagon skel libs)."
-echo "Next: bash tools/recon.sh ; python tools/golden.py check --backend npu ; bash run_demo.sh vi en"
+echo "Next: bash tools/session0.sh   (survey + golden check + smoke test + benchmark, logs packed as .tgz)"
 """
 
 RUN = """#!/usr/bin/env bash
@@ -29,7 +42,7 @@ python -m s2s_edge live --src "${1:-vi}" --tgt "${2:-en}" --models models/models
 
 
 def main():
-    ap = argparse.ArgumentParser(); ap.add_argument("--models-dir", required=True); ap.add_argument("--wheelhouse", default=""); ap.add_argument("--out", default="dist/s2s_edge_pkg"); ap.add_argument("--no-models", action="store_true"); ap.add_argument("--eval-dir", default=""); ap.add_argument("--eval-n", type=int, default=10)
+    ap = argparse.ArgumentParser(); ap.add_argument("--models-dir", required=True); ap.add_argument("--wheelhouse", default=""); ap.add_argument("--wheelhouse310", default="");ap.add_argument("--out", default="dist/s2s_edge_pkg"); ap.add_argument("--no-models", action="store_true"); ap.add_argument("--eval-dir", default=""); ap.add_argument("--eval-n", type=int, default=10)
     a = ap.parse_args(); out = a.out
     if os.path.exists(out): shutil.rmtree(out)
     os.makedirs(out)
@@ -38,6 +51,7 @@ def main():
     for f in ("README.md", "requirements.txt"): shutil.copy(os.path.join(HERE, f), out)
     open(os.path.join(out, "install.sh"), "w", newline="\n").write(INSTALL); open(os.path.join(out, "run_demo.sh"), "w", newline="\n").write(RUN)
     if a.wheelhouse and os.path.isdir(a.wheelhouse): shutil.copytree(a.wheelhouse, os.path.join(out, "wheelhouse"))
+    if a.wheelhouse310 and os.path.isdir(a.wheelhouse310): shutil.copytree(a.wheelhouse310, os.path.join(out, "wheelhouse_cp310"))
     if a.eval_dir:                                              # small evaluation subset (FLEURS test audio + FLORES references) for judges
         os.makedirs(os.path.join(out, "eval"))
         for l in ("vi", "en", "zh", "ko"):

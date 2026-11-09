@@ -119,3 +119,28 @@ def normalize(text, lang):
     text = re.sub(r"(\d+(?:[.,]\d+)?)\s*%", pct, text)
     text = re.sub(r"\d+(?:[.,]\d+)?", lambda m: number(m.group(0)) if lang == "zh" else " " + number(m.group(0)) + " ", text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+# Vietnamese ASR output is lower case without punctuation; NLLB then reads questions as statements ("anh cần thêm dây không" -> "I need more wires.").
+_VI_Q_LAST = {"không", "chưa", "à", "ư", "hả", "hở", "nhỉ", "sao", "gì", "đâu", "nào", "chứ", "hử", "ai", "mấy", "chăng"}
+_VI_Q_WORDS = re.compile(r"\b(bao nhiêu|bao lâu|bao giờ|thế nào|như nào|ở đâu|đi đâu|đến đâu|tại sao|vì sao|làm sao|khi nào|lúc nào|mấy|có phải|phải không|được không|hay là)\b"
+                         r"|\b\w+ nào\b(?! cũng)|\bgì\b|\b\w+ hay \w+")
+_VI_NOT_Q = re.compile(r"\b(không sao|không có gì|chẳng sao|có gì đâu|gì cả|gì đâu|gì cũng|nào cũng|rất hay|thường hay|hay quá|hay lắm)\b"
+                       r"|\b(biết|hiểu|nhớ|hỏi)\b.*\b(gì|đâu|nào|sao|mấy|bao|không)\b")      # "tôi không biết khi nào ..." is a statement
+_VI_NEG_DAU = re.compile(r"\b(không|chưa|chẳng|gì)\b.*\bđâu$")                                 # "chưa quá đông đâu": negation, not "where"
+
+
+def vi_punct(text):
+    """Restore sentence case and a final '?' or '.' on a Vietnamese ASR transcript (rule based: question particles and question words).
+    Measured on the 431 Vietnamese sentences of the organisers' sample set (punctuation removed, then restored): see docs/aibox8550_report.md."""
+    t = re.sub(r"\s+", " ", text).strip()
+    if not t: return t
+    if t[-1] in ".?!": return t[:1].upper() + t[1:]
+    words = t.lower().split(); core = words[:-1] if len(words) > 1 and words[-1] in ("ạ", "nhé", "vậy", "thế", "ha", "hả") and words[-2] in _VI_Q_LAST else words
+    low = " ".join(words); last = core[-1]
+    tail = low if len(words) <= 12 else " ".join(words[-5:])                    # question words inside long sentences are mostly relative ("điều gì thúc đẩy ...")
+    q = last in _VI_Q_LAST or bool(_VI_Q_WORDS.search(tail))
+    if _VI_NOT_Q.search(low) and last not in ("không", "chưa", "à", "ư", "hả", "nhỉ", "chứ"): q = False
+    if last == "đâu" and _VI_NEG_DAU.search(" ".join(core)): q = False
+    if last in ("không", "chưa") and len(core) <= 2 and core[0] in ("không", "chưa", "tôi", "em"): q = False        # bare "không" / "tôi chưa" answers
+    return t[:1].upper() + t[1:] + ("?" if q else ".")

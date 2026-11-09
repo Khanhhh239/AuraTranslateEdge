@@ -11,7 +11,10 @@ sec "cpu";                    lscpu 2>/dev/null | grep -E "Model name|CPU\(s\)|A
 sec "memory";                 free -h
 sec "disk";                   df -h / /home /tmp 2>/dev/null | head -6
 sec "network (expect: none when testing offline)"; ip -br addr 2>/dev/null | head -10; (ping -c1 -W2 8.8.8.8 >/dev/null 2>&1 && echo "INTERNET: reachable") || echo "INTERNET: unreachable"
-sec "python";                 python3 --version 2>&1; pip3 --version 2>&1 | head -1
+sec "glibc (wheel needs >= 2.35 for Python 3.10, >= 2.39 for 3.12)"; ldd --version 2>&1 | head -1
+sec "python";                 python3 --version 2>&1; pip3 --version 2>&1 | head -1; ls /usr/bin/python3* 2>/dev/null | tr '\n' ' '; echo; python3 -c "import venv; print('venv OK')" 2>&1 | tail -1
+sec "docker (fallback when the OS Python/glibc is too old)"; docker --version 2>&1 | head -1; docker images 2>/dev/null | head -5
+sec "usb devices (USB microphone / speaker / PTT button)"; lsusb 2>/dev/null | head -12
 sec "python packages (relevant)"; pip3 list 2>/dev/null | grep -iE "numpy|scipy|onnx|onnxruntime|qai|qnn|sentencepiece|kaldi|soundfile|sounddevice|torch|psutil|jiwer|sacrebleu"
 sec "onnxruntime providers"; python3 -c "import onnxruntime as o; print(o.__version__, o.get_available_providers())" 2>&1 | tail -1
 sec "qai_appbuilder";         python3 -c "import qai_appbuilder, sys; print('qai_appbuilder OK', getattr(qai_appbuilder,'__version__',''))" 2>&1 | tail -1

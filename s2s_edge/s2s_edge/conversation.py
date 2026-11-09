@@ -11,6 +11,7 @@ import numpy as np
 from .audio import SR, segment, normalize_level
 from .asr import AsrXx
 from .names import NameTransliterator
+from .textnorm import vi_punct
 import time
 
 HANGUL = re.compile(r"[가-힣ᄀ-ᇿ]"); HAN = re.compile(r"[一-鿿]"); LATIN = re.compile(r"[A-Za-z]")
@@ -64,6 +65,7 @@ class Engine:
             text = re.sub(pat, rep, text, flags=re.IGNORECASE)
         b = time.perf_counter(); t["asr_s"] = b - a
         if len(re.sub(r"[\W_]+", "", text)) < 2: text = ""                                 # nothing intelligible (noise, breath, a lone "I.")
+        if src == "vi" and text: text = vi_punct(text)                                     # the CTC model outputs no punctuation: restore "?" so MT keeps questions
         mt_text = self.mt(text, src, tgt) if text.strip() else ""
         if tgt in ("zh", "ko") and mt_text: mt_text = self.names(mt_text, tgt)
         c = time.perf_counter(); t["mt_s"] = c - b; tts = self.tts(tgt)

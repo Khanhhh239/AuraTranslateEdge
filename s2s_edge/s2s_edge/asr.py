@@ -23,6 +23,8 @@ class AsrVi:
         self.g = graph; self.sp = spm.SentencePieceProcessor(model_file=bpe_path); self.known = known_words; self.stats = {}
 
     def __call__(self, wav):
+        if len(wav) < int(0.1 * SR):                                             # under 100 ms: no fbank frames, nothing to recognise
+            self.stats = dict(conf_nb=0.0, nb_ratio=0.0, conf_all=0.0, blank_p=1.0, known=0.0, nwords=0); return ""
         f = _fbank(wav[: int(self.max_s * SR)]); n = min(len(f), T_FRAMES); x = np.zeros((1, T_FRAMES, 80), np.float32); x[0, :n] = f[:n]
         out = self.g(x=x, x_lens=np.array([n], np.int64))
         lg, el = (out[0], out[1]) if np.asarray(out[0]).ndim == 3 else (out[1], out[0])
@@ -48,6 +50,7 @@ class AsrXx:
         self.fe = frontend; self.enc = encoder; self.lang = lang
 
     def __call__(self, wav):
+        if len(wav) < int(0.1 * SR): return ""
         n = min(len(wav), 464000); b = np.zeros((1, 464000), np.float32); b[0, :n] = wav[:n]
         lid = np.array([LID[self.lang]], np.int32); tn = np.array([14], np.int32)
         if self.enc is None:                                              # combined graph
