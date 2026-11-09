@@ -71,7 +71,8 @@ Lý do cả ba phiên bản Ubuntu đều dùng **QAIRT 2.51**: các file `.bin`
 | TTS zh Melo | 740,6 ms | 720,2 ms | 92 MB |
 | TTS en/ko Supertonic | 701,2 ms | 748,3 ms | 96 MB |
 
-  Profile job id: asr_vi `jgl8z82ep`, frontend `jp37371xg`, encoder `jpvmomr7p`, mt_enc `jgjymy27g`, mt_dec `jpex1xw7g`, mt_decB `jp11l1wkp`, tts_vi `j57nwnlqp`, tts_zh `jp44o4dqp`, tts_enko `jpxrjr6jp`.
+Profile job id: asr_vi `jgl8z82ep`, frontend `jp37371xg`, encoder `jpvmomr7p`, mt_enc `jgjymy27g`, mt_dec `jpex1xw7g`, mt_decB `jp11l1wkp`, tts_vi `j57nwnlqp`, tts_zh `jp44o4dqp`, tts_enko `jpxrjr6jp`.
+
 - Thứ tự thử trên máy (`session0.sh` làm tự động, ghi bộ chọn được vào `logs/models_ok.txt`): `models_qcs8550/` → `models/` (IQ-9075) → `.dlc` (sửa `"ctx"` trong `models.json` bằng tay; thiết bị tự chuẩn bị graph ở lần nạp đầu, chậm nhưng không phụ thuộc SoC).
 - Ghi chú: "QCS8550 (Proxy)" trên AI Hub là máy **Android** có chip QCS8550. Nó chứng minh file nạp được trên chip này; còn hệ điều hành Linux của AIBOX vẫn phải kiểm tra tại chỗ (mục 1.3).
 
@@ -89,6 +90,7 @@ Lý do cả ba phiên bản Ubuntu đều dùng **QAIRT 2.51**: các file `.bin`
 | Việt ↔ Trung | 180 + 180 | vi 1,1 / 3,1 / 11,1 s; zh 1,5 / 2,7 / 8,8 s | trộn 16 / 22,05 / 24 / 44,1 / 48 kHz, WAV và MP3 | câu giao tiếp |
 
 Những gì dữ liệu cho thấy về bộ test ẩn:
+
 1. **Câu rất ngắn, mang tính hội thoại** (trung vị 2–3 s). Độ trễ cố định của TTS (cửa sổ tĩnh) chiếm phần lớn thời gian. Câu hỏi rất nhiều (174/431 câu tiếng Việt là câu hỏi).
 2. **Định dạng audio không đồng nhất.** Bộ nạp phải tự đọc MP3 và resample. `soundfile` bản aarch64 đọc được MP3; `eval_btc.py` có thêm đường dự phòng qua `ffmpeg`.
 3. **Nhãn và audio có lỗi.** Có câu tiếng Việt mang dấu vết ASR ("Mát mê", "Ống hục ở đâu?"), có cặp lệch nghĩa (VK-0242: "Xe buýt có máy lạnh không?" ↔ "베트남어 가이드가 있나요?"), VK-9110 có câu tiếng Hàn lặp vô hạn, một nhãn tiếng Việt bộ Việt-Trung chỉ ghi đoạn cuối của câu nói ("Được điểm tối đa." cho một câu dài 6,9 s), và file EV-2748 gần như câm (76% mẫu bằng 0, đỉnh 0,007). `eval_btc.py` tự đánh dấu các câu bất thường và cho điểm trên cả tập đầy đủ lẫn tập sạch. Điểm tuyệt đối trên bộ này sẽ thấp hơn trên FLORES; nên dùng nó để **so sánh các phiên bản với nhau**.
@@ -158,6 +160,7 @@ Lỗi ASR tính trên toàn tập (tổng lỗi / tổng độ dài nhãn). Đi�
 | zh→vi | 30 (30) | CER 2,5% | 50,6 / 29,3 | 50,3 / 29,7 | 50,3 / 29,7 |
 
 Nhận xét:
+
 - **Bản dịch đọc ra nghe lại gần như khớp văn bản dịch** (cột cuối thấp hơn cột "MT từ ASR" chỉ 0–3 điểm), nên TTS không phải là chỗ mất chất lượng. Phần mất nằm ở **MT** (vi→ko, ko→vi, vi→zh thấp ngay cả khi dịch từ văn bản chuẩn) và ở **ASR tiếng Anh hội thoại** (en→vi: từ đệm "um/uh", nói nhanh; có 1 file hỏng là EV-2748, 76% mẫu bằng 0).
 - chrF của tiếng Hàn/Trung thấp một phần do cách tính trên ký tự; BLEU tiếng Trung tính theo ký tự nên cao hơn. So sánh theo **chênh lệch giữa các phiên bản**, không theo giá trị tuyệt đối.
 - Thời gian đo trên laptop (CPU fp32, 30–60 s/câu) **không phải** độ trễ thiết bị. Thời gian chip trên QCS8550 ở mục 1.4; số đầu-cuối thật sẽ do `run_btc.sh` đo trên NPU.
