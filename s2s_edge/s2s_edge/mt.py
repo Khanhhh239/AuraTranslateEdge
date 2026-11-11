@@ -62,8 +62,9 @@ class Nllb:
 class NllbSplit(Nllb):
     """Same host logic, but the model is two static graphs (encoder, one decoder step with static KV cache) and the greedy decode loop runs on the host.
     No 15-token limit (up to Tm-1 = 47 target tokens), small files (no unrolled copies of the decoder weights)."""
-    def __init__(self, enc, dec, assets_dir, S=32, Tm=48):
-        Nllb.__init__(self, None, assets_dir, S=S); self.enc = enc; self.dec = dec; self.L, self.H, self.dk = 12, 16, 64
+    def __init__(self, enc, dec, assets_dir, S=32, Tm=48, L=12, H=16, dk=64):
+        # L/H/dk = decoder layers / heads / head size of the KV cache: 12/16/64 for NLLB-600M, 24/16/64 for NLLB-1.3B (models.json "L")
+        Nllb.__init__(self, None, assets_dir, S=S); self.enc = enc; self.dec = dec; self.L, self.H, self.dk = L, H, dk
         self.Tm = Tm; self.steps = 0
 
     def _run(self, toks, src, tgt):
@@ -74,6 +75,8 @@ class NllbSplit(Nllb):
         for t in range(Tm - 1):
             oh = np.zeros(Tm, np.float32); oh[t] = 1.0; mask = np.where(np.arange(Tm) <= t, 0.0, -1e4).astype(np.float32)
             nxt, sk, sv = self.dec(tok=np.array([tok], np.int32), oh=oh, mask=mask, sk=sk, sv=sv, ck=ck, cv=cv, bias=bias)
+            if np.asarray(nxt).size != 1 or np.asarray(sk).size != L * H * Tm * dk:
+                raise RuntimeError(f"decoder output layout unexpected: token {np.asarray(nxt).shape}, kv {np.asarray(sk).shape} (check \"out\" in models.json)")
             nxt = int(np.asarray(nxt).reshape(-1)[0]); sk = np.asarray(sk); sv = np.asarray(sv); self.steps += 1
             tok = lang if t == 0 else nxt; out.append(tok)
             if t > 0 and nxt == 2: break
@@ -85,8 +88,8 @@ class NllbBeam(NllbSplit):
     """Beam search (default 4 beams) over the batched decoder-step graph. The graph returns logits for the pruned vocabulary; log-softmax, top-k, beam
     bookkeeping and the reordering of the per-beam KV caches happen on the host (numpy). Same length-normalised scoring idea as Hugging Face generate()."""
 
-    def __init__(self, enc, decB, assets_dir, S=64, Tm=96, B=4, length_penalty=1.0, no_repeat_ngram=3):
-        NllbSplit.__init__(self, enc, decB, assets_dir, S=S, Tm=Tm); self.B = B; self.lp = length_penalty; self.nr = no_repeat_ngram
+    def __init__(self, enc, decB, assets_dir, S=64, Tm=96, B=4, length_penalty=1.0, no_repeat_ngram=3, L=12, H=16, dk=64):
+        NllbSplit.__init__(self, enc, decB, assets_dir, S=S, Tm=Tm, L=L, H=H, dk=dk); self.B = B; self.lp = length_penalty; self.nr = no_repeat_ngram
         self.keep = np.load(os.path.join(assets_dir, "nllb_keep.npy")).astype(np.int64)                  # pruned id -> original id
         self.inv = np.full(int(self.keep.max()) + 1, -1, np.int64); self.inv[self.keep] = np.arange(len(self.keep))
 
@@ -105,7 +108,10 @@ class NllbBeam(NllbSplit):
         for t in range(tmax):
             oh = np.zeros(Tm, np.float32); oh[t] = 1.0; mask = np.where(np.arange(Tm) <= t, 0.0, -1e4).astype(np.float32)
             lg, sk, sv = self.dec(tok=cur, oh=oh, mask=mask, sk=sk, sv=sv, ck=ck, cv=cv, bias=bias); self.steps += 1
-            sk = np.asarray(sk); sv = np.asarray(sv); lg = np.asarray(lg).reshape(B, -1).astype(np.float64)
+            sk = np.asarray(sk); sv = np.asarray(sv); lg = np.asarray(lg)
+            if lg.size != B * len(self.keep) or sk.size != L * B * H * Tm * dk:                      # wrong output order / wrong graph: fail loudly -> MtFallback
+                raise RuntimeError(f"beam decoder output layout unexpected: logits {lg.shape}, kv {sk.shape} (check \"out\" in models.json)")
+            lg = lg.reshape(B, -1).astype(np.float64)
             if t == 0: cur = np.full(B, lang, np.int32); continue                                    # decoder start; next input is the forced target-language token
             lp = lg - (lg.max(-1, keepdims=True) + np.log(np.exp(lg - lg.max(-1, keepdims=True)).sum(-1, keepdims=True)))
             for bi in range(B):
@@ -128,3 +134,42 @@ class NllbBeam(NllbSplit):
         self.calls += 1
         if fin: body = max(fin, key=lambda f: f[0])[1]; return body, True
         return alive[int(ascore.argmax())], False
+
+
+class MtFallback:
+    """MT with automatic degradation: decoder candidates are tried from the largest beam down to greedy, e.g.
+    mt_decB4 (4 beams) -> mt_decB (2 beams) -> mt_dec (greedy). A candidate is dropped (its graph released to free HTP memory) when building it,
+    the probe translation, or any later translation raises (QNN_COMMON_ERROR_MEM_ALLOC, a context the runtime rejects, a wrong output layout ...);
+    the failing sentence is then translated again with the next candidate, so the caller never sees the error unless every candidate fails.
+    Everything else (calls, truncations, steps ...) is delegated to the active decoder. `active` names it; `failures` lists what was dropped and why."""
+
+    def __init__(self, registry, candidates, build, log=None, probe=True):
+        import sys
+        self.reg = registry; self.cands = list(candidates); self.build = build; self.impl = None; self.active = None; self.failures = []
+        self.log = log or (lambda m: print(m, file=sys.stderr, flush=True)); self._next(probe)
+
+    def _drop(self, key, err):
+        self.failures.append((key, repr(err)[:300])); self.log(f"[s2s] MT decoder {key} failed: {repr(err)[:200]} -> released, falling back")
+        self.impl = None; self.reg.release(key)
+
+    def _next(self, probe):
+        while self.cands:
+            k = self.cands.pop(0)
+            try:
+                impl = self.build(k)
+                if probe: impl("xin chào các bạn", "vi", "en")                    # allocates and runs every graph once: OOM shows up here, not mid-demo
+                self.impl, self.active = impl, k; self.reg.mt_active = k; self.log(f"[s2s] MT decoder in use: {k}"); return
+            except Exception as e:
+                self._drop(k, e)
+        raise RuntimeError(f"no MT decoder candidate works: {self.failures}")
+
+    def __call__(self, text, src, tgt):
+        while True:
+            try: return self.impl(text, src, tgt)
+            except Exception as e:
+                self._drop(self.active, e); self._next(probe=False)            # raises when nothing is left
+
+    def __getattr__(self, name):
+        impl = self.__dict__.get("impl")
+        if impl is None: raise AttributeError(name)
+        return getattr(impl, name)

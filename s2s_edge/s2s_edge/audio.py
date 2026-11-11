@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
 """Audio I/O and utterance segmentation (pure numpy; VAD is energy based so it runs anywhere, no extra model)."""
-import subprocess, shutil, wave, numpy as np
+import os, subprocess, shutil, wave, numpy as np
 
 SR = 16000
+# ALSA devices for the live demo. The KIMQ8550 box has no built-in mic/speaker, so the USB device is often NOT the ALSA default:
+# find it with `arecord -l` / `aplay -l` (tools/audio_check.sh) and set e.g. S2S_MIC=plughw:1,0 S2S_SPK=plughw:1,0.
+_MIC = ["-D", os.environ["S2S_MIC"]] if os.environ.get("S2S_MIC") else []
+_SPK = ["-D", os.environ["S2S_SPK"]] if os.environ.get("S2S_SPK") else []
 
 
 def load_audio(path, sr=SR):
@@ -24,7 +28,7 @@ def save_wav(path, x, sr):
 def record(seconds, sr=SR):
     """Capture from the default microphone (ALSA arecord, or sounddevice if available)."""
     if shutil.which("arecord"):
-        p = subprocess.run(["arecord", "-q", "-f", "S16_LE", "-r", str(sr), "-c", "1", "-d", str(int(seconds)), "-t", "raw"], capture_output=True, check=True)
+        p = subprocess.run(["arecord", "-q", *_MIC, "-f", "S16_LE", "-r", str(sr), "-c", "1", "-d", str(int(seconds)), "-t", "raw"], capture_output=True, check=True)
         return np.frombuffer(p.stdout, np.int16).astype(np.float32) / 32768.0
     import sounddevice as sd
     return sd.rec(int(seconds * sr), samplerate=sr, channels=1, dtype="float32", blocking=True)[:, 0]
@@ -33,7 +37,7 @@ def record(seconds, sr=SR):
 def play(x, sr):
     import tempfile, os
     p = tempfile.mktemp(suffix=".wav"); save_wav(p, x, sr)
-    for c in (["aplay", "-q", p], ["paplay", p], ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", p]):
+    for c in (["aplay", "-q", *_SPK, p], ["paplay", p], ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", p]):
         if shutil.which(c[0]): subprocess.run(c); break
     os.remove(p)
 
@@ -86,7 +90,7 @@ def listen(max_s=12.0, silence_s=0.9, start_timeout_s=8.0, sr=SR):
     `silence_s` of silence following speech, or at max_s. Returns float32 audio (may be empty if nothing was said)."""
     n = int(sr * 0.02); chunks = []; spoken = False; quiet = 0; floor = None; t = 0.0
     if shutil.which("arecord"):
-        p = subprocess.Popen(["arecord", "-q", "-f", "S16_LE", "-r", str(sr), "-c", "1", "-t", "raw"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        p = subprocess.Popen(["arecord", "-q", *_MIC, "-f", "S16_LE", "-r", str(sr), "-c", "1", "-t", "raw"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         read = lambda: p.stdout.read(n * 2)
         stop = p.terminate
         def frame():

@@ -8,6 +8,16 @@ import os, re, unicodedata, numpy as np
 from .textnorm import normalize
 from .names import VietnameseNames, latin_to_vi
 
+def split_outputs(out):
+    """(audio, length, others) from a TTS graph's outputs, independent of their order: the AI Hub inference check on QCS8550 showed the
+    MeloTTS context binary returns (y_len, audio) while the ONNX reference returns (audio, y_len). Audio = the largest output; length = the
+    first integer-typed scalar (Piper / Melo y_len), else the first scalar (Supertonic's float lat_len)."""
+    arrs = [np.asarray(o) for o in out]; ia = max(range(len(arrs)), key=lambda i: arrs[i].size)
+    small = [i for i in range(len(arrs)) if i != ia and arrs[i].size == 1]
+    ints = [i for i in small if np.issubdtype(arrs[i].dtype, np.integer)]; il = (ints or small)[0]
+    return arrs[ia].reshape(-1), float(arrs[il].reshape(-1)[0]), [arrs[i] for i in small if i != il]
+
+
 SENT = re.compile(r"(?<=[\.\!\?;。！？；\n])\s*")
 CLAUSE = re.compile(r"(?<=[,，、:：])\s*")
 
@@ -75,7 +85,7 @@ class TtsVi:
 
     def _synth(self, piece):
         b = unicodedata.normalize("NFC", piece).encode("utf-8")[:512]; x = np.zeros((1, 512), np.int32); x[0, :len(b)] = list(b)
-        out = self.g(text_bytes=x); audio = np.asarray(out[0]).reshape(-1); yl = int(np.asarray(out[1]).reshape(-1)[0]); self.oov += int(np.asarray(out[2]).reshape(-1)[0])
+        audio, yl, rest = split_outputs(self.g(text_bytes=x)); yl = int(round(yl)); self.oov += int(rest[0].reshape(-1)[0]) if rest else 0
         return audio[: max(yl, 1) * 256].astype(np.float32), yl >= 1533
 
     def synthesize(self, text):
@@ -94,8 +104,8 @@ class TtsZh:
         while True:                                            # never cut inside a UTF-8 character
             try: b.decode("utf-8"); break
             except UnicodeDecodeError: b = b[:-1]
-        x = np.zeros((1, 112), np.int32); x[0, :len(b)] = list(b); out = self.g(text_bytes=x)
-        audio = np.asarray(out[0]).reshape(-1); yl = int(np.asarray(out[1]).reshape(-1)[0])
+        x = np.zeros((1, 112), np.int32); x[0, :len(b)] = list(b)
+        audio, yl, _ = split_outputs(self.g(text_bytes=x)); yl = int(round(yl))
         return audio[: max(yl, 1) * 512].astype(np.float32), yl >= 381
 
     def synthesize(self, text):
@@ -119,7 +129,7 @@ class TtsEnKo:
         s = self._clean(self.p._preprocess_text(piece, self.lang))[: self.N]
         if not s.strip(): return np.zeros(0, np.float32), False
         cp = np.zeros((1, self.N), np.int32); cp[0, :len(s)] = [ord(c) for c in s]
-        out = self.g(cp=cp, style_dp=self.dp, style_ttl=self.ttl); wav = np.asarray(out[0]).reshape(-1); lat = int(round(float(np.asarray(out[1]).reshape(-1)[0])))
+        wav, lat, _ = split_outputs(self.g(cp=cp, style_dp=self.dp, style_ttl=self.ttl)); lat = int(round(lat))
         return wav[: max(lat, 1) * 3072].astype(np.float32), lat >= len(wav) // 3072 - 2
 
     def synthesize(self, text):

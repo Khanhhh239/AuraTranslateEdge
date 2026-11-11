@@ -2,7 +2,7 @@
 """Graph backends. A Graph wraps ONE compiled model and is called with named numpy inputs, returning outputs in ONNX output order.
 OrtGraph : onnxruntime CPU (development / reference, runs everywhere).
 QnnGraph : Qualcomm NPU on the device (context binary produced by AI Hub). Loader chosen at run time, see `QnnGraph.load` (decided after tools/recon.sh)."""
-import os, time, json
+import os, sys, time, json
 import numpy as np
 
 
@@ -19,6 +19,10 @@ class Graph:
         t = time.perf_counter(); out = self.run({k: np.ascontiguousarray(v) for k, v in inputs.items()})
         self.calls += 1; self.total_s += time.perf_counter() - t; return out
 
+    def release(self):
+        """Free the runtime resources (used by the MT fallback after an out-of-memory / runtime error)."""
+        pass
+
 
 class OrtGraph(Graph):
     def __init__(self, path, name=None):
@@ -32,6 +36,9 @@ class OrtGraph(Graph):
     def run(self, inputs):
         return self.s.run(None, {k: inputs[k].astype(self.in_types[k], copy=False) for k in self.in_names})
 
+    def release(self):
+        self.s = None
+
 
 _NP = {"float": np.float32, "float32": np.float32, "float16": np.float16, "int32": np.int32, "int64": np.int64, "uint8": np.uint8, "int8": np.int8, "uint16": np.uint16, "int16": np.int16, "uint32": np.uint32}
 _qnn_ready = False
@@ -41,10 +48,24 @@ def _qnn_init():
     """QAI AppBuilder (python wheel qai_appbuilder-2.51.40 for linux_aarch64 bundles the QAIRT 2.51 runtime incl. the Hexagon v73 skel; AI Hub jobs are pinned with `--qairt_version 2.51`)."""
     global _qnn_ready
     if _qnn_ready: return
+    import qai_appbuilder
     from qai_appbuilder import QNNConfig, Runtime, LogLevel, ProfilingLevel, PerfProfile
+    # The wheel sets ADSP_LIBRARY_PATH only when it is empty; if the box already exports one (HSPTek installs QAIRT 2.41 skels in
+    # /usr/lib/rfsa/adsp), the 2.51 stub would meet a 2.41 skel. Put the bundled libs first (same rule as tools/env.sh; S2S_SYSTEM_QNN=1 opts out).
+    libs = os.path.join(os.path.dirname(qai_appbuilder.__file__), "libs")
+    if os.environ.get("S2S_SYSTEM_QNN", "0") != "1" and not sys.platform.startswith("win") and not os.environ.get("ADSP_LIBRARY_PATH", "").startswith(libs):
+        os.environ["ADSP_LIBRARY_PATH"] = f"{libs};/usr/lib/rfsa/adsp;/dsp"
+    print(f"[s2s] ADSP_LIBRARY_PATH={os.environ.get('ADSP_LIBRARY_PATH', '')}", file=sys.stderr)
     QNNConfig.Config(Runtime.HTP, LogLevel.WARN, ProfilingLevel.OFF)
-    try: PerfProfile.SetPerfProfileGlobal(PerfProfile.BURST)          # keep the HTP at burst clocks while the app runs
-    except Exception: pass
+    # S2S_PERF picks the HTP perf profile (default BURST = keep the HTP at burst clocks while the app runs); NONE leaves the system default.
+    # Used by tools/runbook.sh stage A3 to compare profiles on the real box. Names follow qai_appbuilder's PerfProfile enum.
+    want = os.environ.get("S2S_PERF", "BURST").upper()
+    if want != "NONE":
+        try:
+            PerfProfile.SetPerfProfileGlobal(getattr(PerfProfile, want))
+            print(f"[s2s] HTP perf profile: {want}", file=sys.stderr)
+        except Exception as e:
+            print(f"[s2s] could not set perf profile {want}: {e!r}", file=sys.stderr)
     _qnn_ready = True
 
 
@@ -83,6 +104,12 @@ class QnnGraph(Graph):
                 except Exception: pass
             res.append(o)
         return [res[j] for j in self.out_order] if self.out_order else res
+
+    def release(self):
+        """QNNContext.release() frees the context (and its HTP memory) deterministically (qai_appbuilder >= 2.51)."""
+        try: self.ctx.release()
+        except Exception: pass
+        self.ctx = None
 
 
 def make_graph(model_dir, spec, backend):

@@ -97,7 +97,8 @@ def summarize(rows, src, tgt, heard=True):
     for name, sub in (("all", rows), ("clean", [x for x in rows if not flagged(x)])):
         if not sub: continue
         refs = [x["ref"] for x in sub]; e = corpus_err(sub, src)
-        s = dict(n=len(sub), src_err=round(e, 4) if e is not None else None, mt_gold=scores([x["mt_gold"] for x in sub], refs, tgt), mt_e2e=scores([x["mt_e2e"] for x in sub], refs, tgt))
+        s = dict(n=len(sub), src_err=round(e, 4) if e is not None else None, mt_e2e=scores([x["mt_e2e"] for x in sub], refs, tgt))
+        if any(x["mt_gold"] for x in sub): s["mt_gold"] = scores([x["mt_gold"] for x in sub], refs, tgt)     # absent with --no_gold
         if heard and any(x["heard"] for x in sub): s["heard"] = scores([x["heard"] for x in sub], refs, tgt)
         tot = [x["total_s"] for x in sub if "total_s" in x]; aud = [x["audio_s"] for x in sub]
         if tot: s["latency"] = dict(mean_s=round(float(np.mean(tot)), 3), p50_s=round(float(np.median(tot)), 3), p90_s=round(float(np.percentile(tot, 90)), 3),
@@ -109,6 +110,8 @@ def summarize(rows, src, tgt, heard=True):
 ap = argparse.ArgumentParser(); ap.add_argument("--data", default=""); ap.add_argument("--models", default=""); ap.add_argument("--backend", default="npu")
 ap.add_argument("--dirs", default="vi-en,en-vi,vi-ko,ko-vi,vi-zh,zh-vi"); ap.add_argument("--n", type=int, default=0); ap.add_argument("--out", default="logs/btc.json")
 ap.add_argument("--glossary", default=None); ap.add_argument("--no_heard", action="store_true", help="skip ASR of the output audio (faster)")
+ap.add_argument("--split_file", default="", help="JSON from tools/btc_split.py"); ap.add_argument("--split", default="", help="dev | holdout | quick (needs --split_file)")
+ap.add_argument("--no_gold", action="store_true", help="skip translating the gold source text (saves one MT run per clip; mt_gold is then left out)")
 ap.add_argument("--summarize", nargs="+", default=None, help="recompute summaries from saved result JSON files (no models needed) and print one table")
 a = ap.parse_args(); sys.stdout.reconfigure(encoding="utf-8")
 if a.summarize:
@@ -123,11 +126,14 @@ reg = Registry(a.models, a.backend, a.glossary); res = {}
 os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
 for d in a.dirs.split(","):
     src, tgt = d.split("-"); tr = Translator(reg, src, tgt); out_asr = None if a.no_heard else reg.asr(tgt)
-    man = manifest(a.data, d); man = man[: a.n] if a.n else man; rows = []; t0 = time.time()
+    man = manifest(a.data, d)
+    if a.split:
+        keep = set(json.load(open(a.split_file, encoding="utf-8"))["by_dir"][d][a.split]); man = [m for m in man if str(m["id"]) in keep]
+    man = man[: a.n] if a.n else man; rows = []; t0 = time.time()
     for it in man:
         w = load_audio_any(it["wav"]); r = tr.translate(w)
         asr = " ".join(x["asr"] for x in r).strip(); j = "" if tgt == "zh" else " "; mt = j.join(x["mt"] for x in r).strip()
-        mt_gold = tr.mt(it["src_text"], src, tgt) if it["src_text"].strip() else ""
+        mt_gold = tr.mt(it["src_text"], src, tgt) if it["src_text"].strip() and not a.no_gold else ""
         tm = {k: round(sum(x["timing"][k] for x in r), 4) for k in ("asr_s", "mt_s", "tts_s", "total_s", "graph_s")} if r else {}
         heard = ""
         if out_asr is not None and r:

@@ -20,3 +20,10 @@ class Translator:
         for a, b in segment(wav, max_s=max_seg):
             r = self.translate_segment(wav[a:b]); r["span"] = (a / SR, b / SR); out.append(r)
         return out
+
+    def translate_stream(self, wav, max_seg_s=None):
+        """Generator for live output: one result per sentence as soon as its audio is ready (Engine.translate_segment_stream)."""
+        max_seg = max_seg_s or min(getattr(self.asr, "max_s", 12.0), 12.0)
+        for a, b in segment(wav, max_s=max_seg):
+            for r in self.e.translate_segment_stream(wav[a:b], self.src, self.tgt):
+                r["span"] = (a / SR, b / SR); yield r

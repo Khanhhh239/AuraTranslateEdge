@@ -24,6 +24,14 @@ sec "QNN tools / libs";       which qnn-net-run qnn-context-binary-generator qnn
 sec "HTP / DSP devices";      ls -l /dev/fastrpc* /dev/adsprpc* /dev/dri 2>/dev/null; ls /usr/lib/rfsa/adsp /usr/lib/dsp 2>/dev/null | head -20
 sec "audio devices";          arecord -l 2>&1 | head -12; aplay -l 2>&1 | head -12; (pactl info 2>/dev/null | head -4)
 sec "sound python";           python3 -c "import sounddevice as sd; print(sd.query_devices())" 2>&1 | tail -6
+sec "HSPTek OS version (KIMQ8550 guide: Ubuntu 22.04 V3.0.0 expected; datasheet still says 20.04)"; cat /etc/os-version 2>/dev/null
+sec "QAIRT already on the box (user guide pushes 2.41 libs to /usr/lib and the v73 unsigned skel to /usr/lib/rfsa/adsp)"
+                              for f in /usr/lib/libQnnHtp.so /usr/lib/libQnnHtpV73Stub.so /usr/lib/rfsa/adsp/libQnnHtpV73Skel.so /usr/lib/libSNPE.so; do [ -f "$f" ] && echo "$f: $(strings "$f" 2>/dev/null | grep -m1 -oE 'v?2\.[0-9]{2}\.[0-9]+(\.[0-9]+)?')"; done
+                              echo "ADSP_LIBRARY_PATH=${ADSP_LIBRARY_PATH:-<unset>}  LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<unset>}"
+                              (command -v qnn-platform-validator >/dev/null && timeout 60 qnn-platform-validator --backend dsp --testBackend 2>&1 | tail -3) || echo "qnn-platform-validator not installed"
+sec "DSP subsystems (cdsp must be running for the HTP)"; for r in /sys/class/remoteproc/*; do echo "$r: $(cat $r/name 2>/dev/null) $(cat $r/state 2>/dev/null)"; done
+sec "thermal zones (datasheet: thermal TBD, typical 11.9 W, max 18 W on Ubuntu)"; for z in /sys/class/thermal/thermal_zone*; do printf "%s %s\n" "$(cat $z/type 2>/dev/null)" "$(cat $z/temp 2>/dev/null)"; done | head -40
+sec "cpu frequency governors"; cat /sys/devices/system/cpu/cpufreq/policy*/scaling_governor 2>/dev/null | sort | uniq -c
 sec "limits";                 ulimit -a | grep -E "open files|max memory|virtual" ; nproc
 } 2>&1 | tee "$OUT"
 echo; echo "saved $OUT  (copy it back for analysis)"

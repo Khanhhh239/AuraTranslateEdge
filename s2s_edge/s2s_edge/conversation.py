@@ -12,7 +12,24 @@ from .audio import SR, segment, normalize_level
 from .asr import AsrXx
 from .names import NameTransliterator
 from .textnorm import vi_punct
-import time
+import os, time
+
+# Punctuation/casing for the Vietnamese ASR text (Zipformer outputs lower case, no punctuation) before MT:
+#   S2S_VI_PUNCT=model : (default) vibert-capu int8 on the CPU (s2s_edge/punct_vi.py), falls back to the rule when assets/vi_capu is missing.
+#                        Measured 11/11, NLLB chrF on real ASR transcripts (30 clips each): vi->ko 34.1 vs 25.6 (rule), vi->zh 36.3 vs 31.0,
+#                        vi->en 55.1 vs 55.6; on 280 gold sentences without punctuation: vi->en 52.0 vs 50.4, vi->ko 28.9 vs 25.9.
+#   S2S_VI_PUNCT=1     : rule-based vi_punct (final "?" / "."),   S2S_VI_PUNCT=0 : off
+VI_PUNCT_MODE = os.environ.get("S2S_VI_PUNCT", "model").lower()
+VI_PUNCT = VI_PUNCT_MODE != "0"
+
+
+def restore_vi(text):
+    if VI_PUNCT_MODE == "model":
+        from .punct_vi import get
+        from .registry import ASSETS
+        m = get(ASSETS)
+        if m is not None: return m(text)
+    return vi_punct(text)
 
 HANGUL = re.compile(r"[가-힣ᄀ-ᇿ]"); HAN = re.compile(r"[一-鿿]"); LATIN = re.compile(r"[A-Za-z]")
 
@@ -65,7 +82,7 @@ class Engine:
             text = re.sub(pat, rep, text, flags=re.IGNORECASE)
         b = time.perf_counter(); t["asr_s"] = b - a
         if len(re.sub(r"[\W_]+", "", text)) < 2: text = ""                                 # nothing intelligible (noise, breath, a lone "I.")
-        if src == "vi" and text: text = vi_punct(text)                                     # the CTC model outputs no punctuation: restore "?" so MT keeps questions
+        if src == "vi" and text and VI_PUNCT: text = restore_vi(text)                                   # the CTC model outputs no punctuation: restore "?" so MT keeps questions
         mt_text = self.mt(text, src, tgt) if text.strip() else ""
         if tgt in ("zh", "ko") and mt_text: mt_text = self.names(mt_text, tgt)
         c = time.perf_counter(); t["mt_s"] = c - b; tts = self.tts(tgt)
@@ -73,6 +90,42 @@ class Engine:
         g1, c1 = self.gtime(gr); t["total_s"] = d - a; t["graph_s"] = g1 - g0; t["graph_calls"] = c1 - c0; t["host_s"] = t["total_s"] - t["graph_s"]
         t["audio_in_s"] = len(wav) / SR; t["audio_out_s"] = len(out) / sr
         return dict(src=src, tgt=tgt, asr=text, mt=mt_text, wav=out, sr=sr, timing=t)
+
+    def translate_segment_stream(self, wav, src, tgt, text=None, prepped=False):
+        """Pipelined version for live output: ASR once, split the (punctuated) transcript into sentences, then MT + TTS sentence by sentence and
+        yield each result as soon as its audio is ready, so playback of sentence 1 overlaps MT/TTS of sentence 2 (the NPU runs graphs one at a
+        time, so this saves waiting time, not compute). Same fields as translate_segment, plus "part" = (index, count)."""
+        wav = wav if prepped else self.prep(wav); gr = self.graphs_for(src, tgt); a = time.perf_counter()
+        if text is None: text = self.asr(src)(wav)
+        for pat, rep in (self.r.glossary.get("_asr_fix", {}).get(src, {}) or {}).items():
+            text = re.sub(pat, rep, text, flags=re.IGNORECASE)
+        asr_s = time.perf_counter() - a
+        if len(re.sub(r"[\W_]+", "", text)) < 2: return
+        if src == "vi" and VI_PUNCT: text = restore_vi(text)
+        parts = split_sentences(text, src); tts = self.tts(tgt)
+        for i, sent in enumerate(parts):
+            g0, c0 = self.gtime(gr); b = time.perf_counter()
+            mt_text = self.mt(sent, src, tgt)
+            if tgt in ("zh", "ko") and mt_text: mt_text = self.names(mt_text, tgt)
+            c = time.perf_counter(); out, sr = tts.synthesize(mt_text) if mt_text.strip() else (np.zeros(0, np.float32), tts.sr); d = time.perf_counter()
+            g1, c1 = self.gtime(gr); t = dict(asr_s=asr_s if i == 0 else 0.0, mt_s=c - b, tts_s=d - c, total_s=(d - a) if i == 0 else (d - b), graph_s=g1 - g0, graph_calls=c1 - c0)
+            t["host_s"] = t["total_s"] - t["graph_s"]; t["audio_in_s"] = len(wav) / SR if i == 0 else 0.0; t["audio_out_s"] = len(out) / sr
+            yield dict(src=src, tgt=tgt, asr=sent, mt=mt_text, wav=out, sr=sr, timing=t, part=(i, len(parts)))
+
+
+_SENT = re.compile(r"(?<=[\.\!\?。！？])\s+|(?<=[。！？])")
+
+
+def split_sentences(text, lang):
+    """Sentences of a punctuated transcript (vibert-capu output for vi, SenseVoice for en/zh/ko). Pieces of < 2 words (< 3 chars for zh/ko,
+    e.g. a lone 'Vâng.') are merged into the neighbour so MT never gets a fragment out of context."""
+    parts = [p.strip() for p in _SENT.split(text.strip()) if p and p.strip()]
+    small = (lambda p: len(re.sub(r"\W", "", p)) < 3) if lang in ("zh", "ko") else (lambda p: len(p.split()) < 2)
+    out = []
+    for p in parts:
+        if out and (small(p) or small(out[-1])): out[-1] = (out[-1] + ("" if lang in ("zh",) else " ") + p).strip()
+        else: out.append(p)
+    return out or [text]
 
 
 class LanguageID:
@@ -122,3 +175,11 @@ class Conversation:
             r["span"] = (a / SR, b / SR); r["lid"] = st
             if r["mt"]: out.append(r)
         return out
+
+    def translate_stream(self, wav, max_seg_s=12.0):
+        """Generator: one result per sentence as soon as its audio is ready (see Engine.translate_segment_stream)."""
+        for a, b in segment(wav, max_s=max_seg_s):
+            seg = self.e.prep(wav[a:b]); src, tgt, text, st = self.route(seg)
+            for r in self.e.translate_segment_stream(seg, src, tgt, text=text, prepped=True):
+                r["span"] = (a / SR, b / SR); r["lid"] = st
+                if r["mt"]: yield r

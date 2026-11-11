@@ -30,14 +30,17 @@ python3 -m venv .venv || { echo "python3 -m venv failed: install the python3-ven
 pip install --no-index --find-links "$WH" -r requirements.txt openpyxl
 pip install --no-index --find-links "$WH" qai_appbuilder || { echo "qai_appbuilder wheel rejected (glibc $GLIBC too old?). See tools/docker_run.sh"; exit 3; }
 python3 -c "import qai_appbuilder, os; print('qai_appbuilder', os.path.dirname(qai_appbuilder.__file__))"
-echo "ADSP_LIBRARY_PATH is set automatically by qai_appbuilder (bundled Hexagon skel libs)."
+echo "Before running anything: . .venv/bin/activate; . tools/env.sh   (puts the bundled QAIRT 2.51 libs ahead of any QAIRT installed on the box)"
 echo "Next: bash tools/session0.sh   (survey + golden check + smoke test + benchmark, logs packed as .tgz)"
 """
 
 RUN = """#!/usr/bin/env bash
-# usage: bash run_demo.sh <src> <tgt>      e.g. bash run_demo.sh vi en
-cd "$(dirname "$0")"; . .venv/bin/activate
-python -m s2s_edge live --src "${1:-vi}" --tgt "${2:-en}" --models models/models.json --backend npu
+# usage: bash run_demo.sh <src> <tgt> [extra live-mode args]      e.g. S2S_MIC=plughw:1,0 S2S_SPK=plughw:1,0 bash run_demo.sh vi en --continuous
+# Model set: S2S_MODELS, else S2S_MT=13b -> NLLB-1.3B set (models_qcs8550_13b), else the set tools/session0.sh validated, else models_qcs8550 (NLLB-600M).
+cd "$(dirname "$0")"; . .venv/bin/activate; . tools/env.sh
+case "${S2S_MT:-600m}" in 13b|1.3b|B) DEF=models_qcs8550_13b/models.json ;; *) DEF=$(cat logs/models_ok.txt 2>/dev/null || echo models_qcs8550/models.json) ;; esac   # A = NLLB-600M, B = NLLB-1.3B
+M=${S2S_MODELS:-$DEF}
+python -m s2s_edge live --src "${1:-vi}" --tgt "${2:-en}" --models "$M" --backend npu "${@:3}"
 """
 
 

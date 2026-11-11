@@ -10,7 +10,7 @@ D=logs/session0_$(date +%Y%m%d_%H%M%S); mkdir -p "$D"
 run() { n=$1; shift; echo "=== $n"; s=$(date +%s); ( "$@" ) > "$D/$n.log" 2>&1; rc=$?; echo "exit $rc ($(( $(date +%s) - s )) s)" | tee -a "$D/$n.log"; tail -4 "$D/$n.log"; return $rc; }
 run 00_recon       bash tools/recon.sh
 [ -d .venv ] || run 01_install bash install.sh
-. .venv/bin/activate 2>/dev/null
+. .venv/bin/activate 2>/dev/null && . tools/env.sh
 run 02_import      python -c "import qai_appbuilder, os; print(qai_appbuilder.__file__); print(os.listdir(os.path.join(os.path.dirname(qai_appbuilder.__file__), 'libs'))[:20])"
 M=""
 for cand in ${MODELS:-} models_qcs8550/models.json models/models.json; do
