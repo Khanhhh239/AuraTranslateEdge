@@ -1,0 +1,7 @@
+work/*.onnx
+work/*.npz
+work/*.npy
+work/wav_*
+MeloTTS/
+__pycache__/
+*.pyc

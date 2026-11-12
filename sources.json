@@ -1,0 +1,59 @@
+{
+  "contest_VNG": {
+    "commit": "abe8e30f33228fa3189025a935113c219b8f4ede",
+    "paths": [
+      "s2s_edge"
+    ],
+    "destination": "."
+  },
+  "main": {
+    "commit": "178dbf760eec3e6833f113784f2bf64410ef09fc",
+    "paths": [
+      "src",
+      "requirements.txt"
+    ],
+    "destination": "reference_main"
+  },
+  "zipformer": {
+    "commit": "39c34566e8b4987c976f08163df8431e3ea795fb",
+    "paths": [
+      "zipformer_npu"
+    ],
+    "destination": "components"
+  },
+  "sensevoice": {
+    "commit": "af5f9979a58a0b472c576cfeca430c54f7686bdc",
+    "paths": [
+      "sensevoice_npu"
+    ],
+    "destination": "components"
+  },
+  "nllb": {
+    "commit": "ebad1c3aad285157f27f195e7206395ca9744028",
+    "paths": [
+      "nllb_npu"
+    ],
+    "destination": "components"
+  },
+  "piper": {
+    "commit": "eaffbc42044edfddda9e199c545449774cb29e58",
+    "paths": [
+      "piper_npu"
+    ],
+    "destination": "components"
+  },
+  "melotts": {
+    "commit": "ca12aa996459d756d189d575aeb9bda336a6ae15",
+    "paths": [
+      "melotts_npu"
+    ],
+    "destination": "components"
+  },
+  "supertonic": {
+    "commit": "e6e80e8ab050a017d97636f305ea2083d85e7f71",
+    "paths": [
+      "supertonic_npu"
+    ],
+    "destination": "components"
+  }
+}

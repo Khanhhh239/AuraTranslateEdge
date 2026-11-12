@@ -12,6 +12,7 @@ from .audio import SR, segment, normalize_level
 from .asr import AsrXx
 from .names import NameTransliterator
 from .textnorm import vi_punct
+from . import neural_textnorm
 import os, time
 
 # Punctuation/casing for the Vietnamese ASR text (Zipformer outputs lower case, no punctuation) before MT:
@@ -74,6 +75,17 @@ class Engine:
 
     def gtime(self, graphs): return sum(g.total_s for g in graphs), sum(g.calls for g in graphs)
 
+    def prepare_text(self, text, src):
+        if text and src in ("vi", "en") and neural_textnorm.enabled():
+            parts = neural_textnorm.get().prepare_source(text, src, self.mt.S - 2, self.mt.encode)
+            return " ".join(parts), parts
+        return (restore_vi(text) if src == "vi" and text and VI_PUNCT else text), None
+
+    def translate_text(self, text, src, tgt, parts=None):
+        if not text.strip(): return ""
+        if parts is None: return self.mt(text, src, tgt)
+        return ("" if tgt == "zh" else " ").join(self.mt.translate_atomic(p, src, tgt) for p in parts)
+
     def translate_segment(self, wav, src, tgt, text=None, prepped=False):
         """text: pre-computed ASR text (language identification already ran the ASR)."""
         wav = wav if prepped else self.prep(wav); gr = self.graphs_for(src, tgt); g0, c0 = self.gtime(gr); t = {}; a = time.perf_counter()
@@ -82,14 +94,16 @@ class Engine:
             text = re.sub(pat, rep, text, flags=re.IGNORECASE)
         b = time.perf_counter(); t["asr_s"] = b - a
         if len(re.sub(r"[\W_]+", "", text)) < 2: text = ""                                 # nothing intelligible (noise, breath, a lone "I.")
-        if src == "vi" and text and VI_PUNCT: text = restore_vi(text)                                   # the CTC model outputs no punctuation: restore "?" so MT keeps questions
-        mt_text = self.mt(text, src, tgt) if text.strip() else ""
+        asr_text = text
+        text, prepared = self.prepare_text(text, src)
+        t["source_normalize_s"] = time.perf_counter() - b
+        mt_text = self.translate_text(text, src, tgt, prepared)
         if tgt in ("zh", "ko") and mt_text: mt_text = self.names(mt_text, tgt)
-        c = time.perf_counter(); t["mt_s"] = c - b; tts = self.tts(tgt)
+        c = time.perf_counter(); t["mt_s"] = c - b - t["source_normalize_s"]; tts = self.tts(tgt)
         out, sr = tts.synthesize(mt_text) if mt_text.strip() else (np.zeros(0, np.float32), tts.sr); d = time.perf_counter(); t["tts_s"] = d - c
         g1, c1 = self.gtime(gr); t["total_s"] = d - a; t["graph_s"] = g1 - g0; t["graph_calls"] = c1 - c0; t["host_s"] = t["total_s"] - t["graph_s"]
         t["audio_in_s"] = len(wav) / SR; t["audio_out_s"] = len(out) / sr
-        return dict(src=src, tgt=tgt, asr=text, mt=mt_text, wav=out, sr=sr, timing=t)
+        return dict(src=src, tgt=tgt, asr=text, asr_before_normalization=asr_text, mt=mt_text, tts_text=getattr(tts, "tts_input_text", mt_text) if mt_text.strip() else '', tts_format=getattr(tts, 'format_trace', {}) if mt_text.strip() else {}, wav=out, sr=sr, timing=t)
 
     def translate_segment_stream(self, wav, src, tgt, text=None, prepped=False):
         """Pipelined version for live output: ASR once, split the (punctuated) transcript into sentences, then MT + TTS sentence by sentence and
@@ -101,16 +115,16 @@ class Engine:
             text = re.sub(pat, rep, text, flags=re.IGNORECASE)
         asr_s = time.perf_counter() - a
         if len(re.sub(r"[\W_]+", "", text)) < 2: return
-        if src == "vi" and VI_PUNCT: text = restore_vi(text)
-        parts = split_sentences(text, src); tts = self.tts(tgt)
+        text, prepared = self.prepare_text(text, src)
+        parts = prepared if prepared is not None else split_sentences(text, src); tts = self.tts(tgt)
         for i, sent in enumerate(parts):
             g0, c0 = self.gtime(gr); b = time.perf_counter()
-            mt_text = self.mt(sent, src, tgt)
+            mt_text = self.translate_text(sent, src, tgt, [sent] if prepared is not None else None)
             if tgt in ("zh", "ko") and mt_text: mt_text = self.names(mt_text, tgt)
             c = time.perf_counter(); out, sr = tts.synthesize(mt_text) if mt_text.strip() else (np.zeros(0, np.float32), tts.sr); d = time.perf_counter()
             g1, c1 = self.gtime(gr); t = dict(asr_s=asr_s if i == 0 else 0.0, mt_s=c - b, tts_s=d - c, total_s=(d - a) if i == 0 else (d - b), graph_s=g1 - g0, graph_calls=c1 - c0)
             t["host_s"] = t["total_s"] - t["graph_s"]; t["audio_in_s"] = len(wav) / SR if i == 0 else 0.0; t["audio_out_s"] = len(out) / sr
-            yield dict(src=src, tgt=tgt, asr=sent, mt=mt_text, wav=out, sr=sr, timing=t, part=(i, len(parts)))
+            yield dict(src=src, tgt=tgt, asr=sent, mt=mt_text, tts_text=getattr(tts, 'tts_input_text', mt_text) if mt_text.strip() else '', tts_format=getattr(tts, 'format_trace', {}) if mt_text.strip() else {}, wav=out, sr=sr, timing=t, part=(i, len(parts)))
 
 
 _SENT = re.compile(r"(?<=[\.\!\?。！？])\s+|(?<=[。！？])")

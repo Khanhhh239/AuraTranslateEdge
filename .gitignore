@@ -11,6 +11,32 @@ data/mt/raw/
 .DS_Store
 *.DS_Store
 tmp/
+logs/
+
+# Large models and weights (> 100MB)
+build/
+models/source/
+models/normalization/
+*.onnx
+*.bin
+*.pth
+*.pt
+*.safetensors
+*.nemo
+*.tar
+*.tar.gz
+
+# Audio files
+*.wav
+*.flac
+*.mp3
+*.m4a
+*.ogg
+results/**/audio/
+results/**/en_vi_tts/
+results/**/s2s/
+reports/**/en_vi_tts/
+reports/**/s2s/
 
 # Experiment outputs & local benchmarks (large logs/audio)
 output/

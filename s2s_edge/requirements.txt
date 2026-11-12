@@ -5,6 +5,7 @@ sentencepiece
 kaldi-native-fbank
 onnxruntime
 psutil
+python-crfsuite
 # optional
 sounddevice
 jiwer

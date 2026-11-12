@@ -58,6 +58,12 @@ class Nllb:
         sep = "" if tgt == "zh" else " "
         return sep.join(x for x in (self._tr(s, src, tgt) for s in sents) if x)
 
+    def translate_atomic(self, text, src, tgt):
+        """Translate an already segmented span without splitting its decimal points."""
+        if len(self.encode(text)) > self.S - 2:
+            raise ValueError('Prepared MT span exceeds graph input length')
+        return self._tr(text, src, tgt)
+
 
 class NllbSplit(Nllb):
     """Same host logic, but the model is two static graphs (encoder, one decoder step with static KV cache) and the greedy decode loop runs on the host.
@@ -168,6 +174,14 @@ class MtFallback:
             try: return self.impl(text, src, tgt)
             except Exception as e:
                 self._drop(self.active, e); self._next(probe=False)            # raises when nothing is left
+
+    def translate_atomic(self, text, src, tgt):
+        while True:
+            try: return self.impl.translate_atomic(text, src, tgt)
+            except ValueError:
+                raise
+            except Exception as e:
+                self._drop(self.active, e); self._next(probe=False)
 
     def __getattr__(self, name):
         impl = self.__dict__.get("impl")

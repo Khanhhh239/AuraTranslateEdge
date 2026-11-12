@@ -1,0 +1,9 @@
+build/
+data/
+outputs/
+__pycache__/
+*.pyc
+*.onnx
+*.npz
+*.pkl
+*.log
