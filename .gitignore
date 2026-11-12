@@ -7,6 +7,13 @@ data/**/*.ogg
 data/mixed/
 data/mt/flores200_dataset.tar.gz
 data/mt/raw/
+# OS & temp
+.DS_Store
+*.DS_Store
+tmp/
+
+# Experiment outputs & local benchmarks (large logs/audio)
+output/
 outputs/
 __pycache__/
 *.pyc
