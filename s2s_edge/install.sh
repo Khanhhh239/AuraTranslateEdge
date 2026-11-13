@@ -34,4 +34,4 @@ python -m pip install --no-index --find-links "$WH" qai_appbuilder || { echo "qa
 . tools/env.sh 2>/dev/null   # libatomic fallback + bundled QAIRT 2.51 libs, needed to import qai_appbuilder
 python -c "import numpy, scipy, soundfile, sentencepiece, kaldi_native_fbank, onnxruntime, jiwer, sacrebleu, openpyxl, qai_appbuilder, os; print('imports OK; qai_appbuilder', os.path.dirname(qai_appbuilder.__file__))"
 echo "Before running anything: . .venv/bin/activate; . tools/env.sh   (puts the bundled QAIRT 2.51 libs ahead of any QAIRT installed on the box)"
-echo "Next: bash tools/vng_run_all.sh /root/onevoice 30   (or step by step: bash tools/session0.sh)"
+echo "Next: bash start.sh demo (web demo) | bash start.sh box (batch web UI) | bash start.sh check (NPU check only)"
