@@ -1,6 +1,6 @@
 """Start or safely reuse the user-facing local OneVoice web server."""
 from pathlib import Path
-import argparse, json, os, signal, subprocess, sys, time, urllib.request
+import argparse, json, os, signal, subprocess, sys, tempfile, time, urllib.request
 
 root = Path(__file__).resolve().parents[1]
 if str(root / "s2s_edge") not in sys.path:
@@ -46,7 +46,7 @@ def build_launch_env(
     env.setdefault("S2S_TTS_FORMAT", "hybrid")
     env.setdefault("S2S_VAD_PROFILE", "legacy")
     env.setdefault("S2S_ORT_POLICY", "auto")
-    env.setdefault("HF_HOME", "/private/tmp/s2s-hf")
+    env.setdefault("HF_HOME", os.path.join(tempfile.gettempdir(), "s2s-hf"))   # /private/tmp exists only on macOS
     requested_profile_from_env(env)
     return env
 
@@ -242,7 +242,7 @@ def parse_args(argv=None):
     ap.add_argument("--port", type=int, default=8766)
     ap.add_argument("--out-dir", default=None)
     ap.add_argument("--log-file", default=None)
-    ap.add_argument("--vad-profile", default=None, choices=["legacy", "upstream"])
+    ap.add_argument("--vad-profile", default=None, choices=["hybrid", "legacy", "upstream"])
     ap.add_argument("--ort-policy", default=None, choices=["auto", "basic", "disable"])
     ap.add_argument("--source-mode", default=None, choices=["0", "1"])
     ap.add_argument("--tts-format", default=None, choices=["hybrid", "legacy"])

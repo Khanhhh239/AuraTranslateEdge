@@ -663,7 +663,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--run-id", required=True, help="Unique immutable run identifier (cannot be 'before'/'after' or already exist).")
     ap.add_argument("--manifest", default=str(DEFAULT_MANIFEST), help="Fixture manifest JSON path.")
     ap.add_argument("--source-mode", choices=["0", "1"], default=None, help="S2S_NEURAL_TN value; preserves caller env when omitted.")
-    ap.add_argument("--vad-profile", choices=["legacy", "upstream"], default=None, help="VAD profile; defaults to safe 'legacy'.")
+    ap.add_argument("--vad-profile", choices=["hybrid", "legacy", "upstream"], default=None, help="VAD profile; defaults to safe 'legacy'.")
     ap.add_argument("--ort-policy", choices=["basic", "disable", "auto"], default=None, help="ONNX Runtime session optimization policy.")
     ap.add_argument("--tts-format", choices=["hybrid", "legacy", "neural"], default=None, help="TTS format mode.")
     ap.add_argument("--models", default=str(DEFAULT_MODELS), help="models.json path.")

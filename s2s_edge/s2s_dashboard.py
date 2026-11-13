@@ -9,9 +9,12 @@ Supports:
   4. Real-time latency breakdown (ASR, MT, TTS, Total)
   5. Dual backend: S2S Engine (ONNX/QNN) with automatic local Torch/CUDA fallback if ONNX graphs missing.
 
+Laptop/dev only: the fallback path needs torch + transformers + funasr, which the AIBOX 8550 package does not ship. On the box use
+`python -m s2s_edge live ...` or tools/s2s_web.py with S2S_BACKEND=npu (docs/aibox8550_integration.md).
+
 Usage:
   cd s2s_edge
-  python s2s_web.py --port 8765
+  python s2s_dashboard.py --port 8765
   # Open in browser: http://localhost:8765
 """
 import argparse, base64, io, json, os, re, secrets, subprocess, sys, threading, time, wave
@@ -526,7 +529,7 @@ class LocalPipeline:
             audio = np.frombuffer(raw_bytes, dtype=np.int16).astype(np.float32) / 32768.0
             sr = voice.config.sample_rate
         except Exception as e:
-            print(f"[s2s_web] ⚠️ TTS synthesis error: {e}", flush=True)
+            print(f"[s2s_dashboard] ⚠️ TTS synthesis error: {e}", flush=True)
             # Fallback sine wave tone
             sr = 16000
             t = np.linspace(0, 0.5, sr, endpoint=False)
@@ -562,7 +565,7 @@ def main():
             self.wfile.write(body)
 
         def log_message(self, fmt, *args):
-            print(f"[s2s_web] {fmt % args}", flush=True)
+            print(f"[s2s_dashboard] {fmt % args}", flush=True)
 
         def do_GET(self):
             parsed = urlparse(self.path)

@@ -12,12 +12,15 @@ os.environ.setdefault('S2S_NEURAL_TN','1')
 os.environ.setdefault('S2S_TTS_FORMAT','hybrid')
 os.environ.setdefault('S2S_VAD_PROFILE','legacy')
 os.environ.setdefault('S2S_ORT_POLICY','auto')
-os.environ.setdefault('HF_HOME','/private/tmp/s2s-hf')
+import tempfile
+os.environ.setdefault('HF_HOME',os.path.join(tempfile.gettempdir(),'s2s-hf'))   # /private/tmp exists only on macOS
 MAX_BYTES=2*1024*1024
 from s2s_edge.registry import resolve_runtime_profile, runtime_code_fingerprint
 
 class Service:
- def __init__(self,out,vad_profile=None,ort_policy=None,source_mode=None,tts_format=None):
+ def __init__(self,out,vad_profile=None,ort_policy=None,source_mode=None,tts_format=None,models=None,backend=None):
+  # models/backend: S2S_MODELS / S2S_BACKEND (AIBOX 8550: the package's models_qcs8550/models.json + npu); default = laptop CPU reference
+  self.models=Path(models or os.environ.get('S2S_MODELS') or ROOT/'models/models.cpu.json');self.backend=backend or os.environ.get('S2S_BACKEND','cpu')
   self.out=out;out.mkdir(parents=True,exist_ok=True);self.jobs={};self.lock=threading.RLock();self.pool=ThreadPoolExecutor(max_workers=1,thread_name_prefix='s2s')
   self.vad_profile_arg=vad_profile;self.ort_policy_arg=ort_policy;self.source_mode_arg=source_mode;self.tts_format_arg=tts_format
   self.profile=resolve_runtime_profile(vad_profile=vad_profile,ort_policy=ort_policy,source_mode=source_mode,tts_format=tts_format)
@@ -52,7 +55,7 @@ class Service:
    w=load_audio(str(folder/'input.wav'))
    if not len(w) or not np.isfinite(w).all() or float(np.max(abs(w)))<1e-5:raise ValueError('Bản thu không có tín hiệu. Hãy kiểm tra mic và nói lại.')
    profile=dict(self.profile)
-   reg=Registry(str(ROOT/'models/models.cpu.json'),'cpu',ort_policy=profile['ort_policy'],vad_profile=profile['vad_profile'],source_mode=profile['source_mode'],tts_format=profile['tts_format']);translator=Translator(reg,src,tgt,vad_profile=profile['vad_profile'])
+   reg=Registry(str(self.models),self.backend,ort_policy=profile['ort_policy'],vad_profile=profile['vad_profile'],source_mode=profile['source_mode'],tts_format=profile['tts_format']);translator=Translator(reg,src,tgt,vad_profile=profile['vad_profile'])
    raw=[];service=self
    class ASR:
     def __init__(self,m):self.m=m
@@ -143,8 +146,8 @@ def build_handler(service, port):
  return Handler
 
 def main():
- ap=argparse.ArgumentParser();ap.add_argument('--port',type=int,default=8766);ap.add_argument('--out-dir',default=None);ap.add_argument('--vad-profile',default=None,choices=['legacy','upstream']);ap.add_argument('--ort-policy',default=None,choices=['auto','basic','disable']);ap.add_argument('--source-mode',default=None,choices=['0','1']);ap.add_argument('--tts-format',default=None,choices=['hybrid','legacy']);args=ap.parse_args()
- service=Service(Path(args.out_dir) if args.out_dir else (ROOT/'results/mic_web'),vad_profile=args.vad_profile,ort_policy=args.ort_policy,source_mode=args.source_mode,tts_format=args.tts_format)
+ ap=argparse.ArgumentParser();ap.add_argument('--port',type=int,default=8766);ap.add_argument('--out-dir',default=None);ap.add_argument('--vad-profile',default=None,choices=['hybrid','legacy','upstream']);ap.add_argument('--ort-policy',default=None,choices=['auto','basic','disable']);ap.add_argument('--source-mode',default=None,choices=['0','1']);ap.add_argument('--tts-format',default=None,choices=['hybrid','legacy']);ap.add_argument('--models',default=None,help='models.json (default: $S2S_MODELS or models/models.cpu.json)');ap.add_argument('--backend',default=None,choices=['cpu','npu'],help='default: $S2S_BACKEND or cpu');args=ap.parse_args()
+ service=Service(Path(args.out_dir) if args.out_dir else (ROOT/'results/mic_web'),vad_profile=args.vad_profile,ort_policy=args.ort_policy,source_mode=args.source_mode,tts_format=args.tts_format,models=args.models,backend=args.backend)
  Handler=build_handler(service, args.port)
  print(f'OneVoice mic web: http://localhost:{args.port}',flush=True)
  ThreadingHTTPServer(('127.0.0.1',args.port),Handler).serve_forever()

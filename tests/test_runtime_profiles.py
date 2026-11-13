@@ -62,8 +62,11 @@ class RuntimeProfileUnitTests(unittest.TestCase):
         wav = np.concatenate([np.zeros(3200), voice, np.zeros(9600), voice, np.zeros(3200)]).astype(np.float32)
 
         # Default legacy merges 0.6s gap (1 seg); caller explicitly overriding min_sil_ms=260 & merge_gap_s=0.2 forces split (2 segs)
-        self.assertEqual(len(segment(wav)), 1)
-        self.assertEqual(len(segment(wav, min_sil_ms=260, merge_gap_s=0.2)), 2)
+        self.assertEqual(len(segment(wav, vad_profile="legacy")), 1)
+        self.assertEqual(len(segment(wav, min_sil_ms=260, merge_gap_s=0.2, vad_profile="legacy")), 2)
+        # hybrid (default): an in-sentence 0.6 s pause is joined (join_gap_s 0.8); join_gap_s=0 keeps caller overrides effective
+        self.assertEqual(len(segment(wav, vad_profile="hybrid")), 1)
+        self.assertEqual(len(segment(wav, min_sil_ms=260, merge_gap_s=0.2, join_gap_s=0.0, vad_profile="hybrid")), 2)
 
         # Even with upstream profile, caller overriding min_sil_ms=700 & merge_gap_s=1.0 preserves 1 merged segment
         with patch.dict(os.environ, {"S2S_VAD_PROFILE": "upstream"}):
@@ -269,7 +272,7 @@ class RuntimeProfileUnitTests(unittest.TestCase):
             self.assertEqual(reg.source_mode, "0")
 
             tr = Translator(reg, "en", "vi")
-            tr.e.translate_segment = lambda wav, src, tgt, text=None, prepped=False: {
+            tr.e.translate_segment = lambda wav, src, tgt, text=None, prepped=False, breaks=None: {
                 "src": src,
                 "tgt": tgt,
                 "asr": "hi",
@@ -278,7 +281,7 @@ class RuntimeProfileUnitTests(unittest.TestCase):
                 "sr": 16000,
                 "timing": {},
             }
-            tr.e.translate_segment_stream = lambda wav, src, tgt, text=None, prepped=False: iter(
+            tr.e.translate_segment_stream = lambda wav, src, tgt, text=None, prepped=False, breaks=None: iter(
                 [{"src": src, "tgt": tgt, "asr": "hi", "mt": "chao", "wav": np.zeros(100, np.float32), "sr": 16000, "timing": {}}]
             )
 
@@ -291,9 +294,7 @@ class RuntimeProfileUnitTests(unittest.TestCase):
                 return [(0, len(wav))]
 
             dummy = np.ones(1600, np.float32) * 0.1
-            with patch("s2s_edge.pipeline.segment", side_effect=fake_segment), patch(
-                "s2s_edge.conversation.segment", side_effect=fake_segment
-            ):
+            with patch("s2s_edge.audio.segment", side_effect=fake_segment):
                 self.assertEqual(len(tr.translate(dummy)), 1)
                 self.assertEqual(len(list(tr.translate_stream(dummy))), 1)
                 self.assertEqual(len(conv.translate(dummy)), 1)

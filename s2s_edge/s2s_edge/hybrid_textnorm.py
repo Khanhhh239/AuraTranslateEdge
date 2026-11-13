@@ -180,7 +180,13 @@ class HybridNormalizer:
             if _CRF is None:
                 from pathlib import Path
                 from .identifier_tagger import IdentifierTagger
-                _CRF = IdentifierTagger(Path(__file__).resolve().parents[2] / 'models/normalization/identifier.crfsuite')
+                here = Path(__file__).resolve()
+                # S2S_IDENTIFIER_CRF, then the package assets (AIBOX package: tools/build_package.py copies it), then the dev repo
+                cands = [os.environ.get('S2S_IDENTIFIER_CRF') or '', here.parents[1] / 'assets/identifier.crfsuite',
+                         here.parents[2] / 'models/normalization/identifier.crfsuite']
+                path = next((Path(c) for c in cands if c and Path(c).is_file()), None)
+                if path is None: raise OSError('identifier.crfsuite not found')
+                _CRF = IdentifierTagger(path)
             self.identifier_model_status = 'CRF loaded'
             found = []; cursor = 0
             for raw in _CRF(text, lang):
@@ -190,7 +196,7 @@ class HybridNormalizer:
                 if re.fullmatch(r'[A-Za-z\d+() -]+', raw) and any(c.isdecimal() for c in raw):
                     found.append((a, cursor))
             return found
-        except (ImportError, OSError):
+        except Exception:                                              # no pycrfsuite / no model file / unreadable model
             self.identifier_model_status = 'unavailable; context grammars only'
             return []
 

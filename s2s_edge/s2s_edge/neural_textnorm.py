@@ -12,6 +12,25 @@ _MODEL=None
 
 def enabled():return os.environ.get('S2S_NEURAL_TN','0')=='1'
 
+_USABLE=None;_WARNED=set()
+
+def usable():
+    """(ok, reason). The learned normalizer runs Qwen through Apple MLX (mlx_lm): it cannot run on the AIBOX 8550 (aarch64 Linux, no
+    MLX wheel). Callers fall back to the rule/grammar path instead of crashing the pipeline."""
+    global _USABLE
+    if _USABLE is None:
+        import importlib.util
+        try: has=importlib.util.find_spec('mlx_lm') is not None
+        except (ImportError,ValueError): has=False
+        _USABLE=(True,'') if has else (False,'mlx_lm is not installed (Apple Silicon only)')
+    return _USABLE
+
+def warn_unusable(what):
+    ok,reason=usable()
+    if not ok and what not in _WARNED:
+        import sys;_WARNED.add(what)
+        print(f'[s2s] {what}: neural normalizer unavailable ({reason}) -> rule-based path',file=sys.stderr)
+
 def get():
     global _MODEL
     if _MODEL is None:_MODEL=NeuralNormalizer()

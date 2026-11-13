@@ -19,6 +19,8 @@ def mode(tts_format=None):
 
 def prepare(text, lang, mode=None):
     selected = resolve_mode(mode)
+    if selected == 'neural' and not neural_textnorm.usable()[0]:
+        neural_textnorm.warn_unusable('tts_format=neural'); selected = 'hybrid'
     if selected == 'hybrid':
         return hybrid_textnorm.normalize(text, lang)
     if selected == 'neural' and lang in ('en', 'vi'):

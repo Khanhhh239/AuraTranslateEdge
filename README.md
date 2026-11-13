@@ -175,7 +175,7 @@ AuraTranslateEdge-OneVoice/
 ├── s2s_edge/                          # ENGINE TRIỂN KHAI EDGE CHÍNH THỨC (PHASE 3)
 │   ├── README.md                      # Chi tiết kiến trúc NPU Qualcomm Hexagon v73
 │   ├── requirements.txt               # Dependencies tối giản phục vụ chạy on-device (7 gói)
-│   ├── s2s_web.py                     # Giao diện Web Dashboard cục bộ thử nghiệm S2S
+│   ├── s2s_dashboard.py               # Giao diện Web Dashboard cục bộ thử nghiệm S2S
 │   ├── glossary.example.json          # File cấu hình thuật ngữ mẫu
 │   ├── glossary_enterprise.json       # Bảng thuật ngữ chuyên ngành công nghiệp & FDI
 │   ├── models.dev*.json               # Cấu hình đường dẫn model ONNX tham chiếu CPU
@@ -285,6 +285,9 @@ python tools/eval_btc.py \
 ```
 
 ### 6.3. Triển khai & Đo kiểm trên phần cứng thật (HSPTEK AIBOX 8550)
+
+> [!NOTE]
+> Nhánh tích hợp `integrate/aibox8550` gộp `feat/plan01-measurement`, `asr-improvement` và `asr-speed-accuracy`. Mặc định mới (VAD `hybrid`), cách dựng gói kèm cải tiến ASR (`--asr-config`) và các giới hạn trên box: [`s2s_edge/docs/aibox8550_integration.md`](s2s_edge/docs/aibox8550_integration.md). Tài liệu E2E OneVoice trước đây: [`docs/README_onevoice_e2e.md`](docs/README_onevoice_e2e.md).
 
 Các bước thực hiện khi kết nối laptop với hộp AIBOX 8550 qua cáp USB Type-C:
 

@@ -121,10 +121,14 @@ class Engine:
 
     def neural_enabled(self):
         if self.source_mode is not None:
-            return self.source_mode == "1"
-        if getattr(self.r, "source_mode", None) is not None:
-            return str(self.r.source_mode) == "1"
-        return neural_textnorm.enabled()
+            want = self.source_mode == "1"
+        elif getattr(self.r, "source_mode", None) is not None:
+            want = str(self.r.source_mode) == "1"
+        else:
+            want = neural_textnorm.enabled()
+        if want and not neural_textnorm.usable()[0]:                  # e.g. on the AIBOX 8550: no MLX -> vi punctuation / plain MT path
+            neural_textnorm.warn_unusable("source_mode=1"); return False
+        return want
 
     def _punct_stage(self, text, src, raw_words, word_ends, breaks):
         """-> (text, parts). parts is the list of MT units from the neural source normalizer (source_mode=1), else None."""

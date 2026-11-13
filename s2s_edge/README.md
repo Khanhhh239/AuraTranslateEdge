@@ -41,7 +41,7 @@ python -m s2s_edge live --src vi --tgt zh --backend cpu --models models/models.j
 
 Hoặc chạy giao diện Web Dashboard cục bộ trực quan:
 ```bash
-python s2s_web.py --port 8765
+python s2s_dashboard.py --port 8765
 # Mở trình duyệt tại: http://localhost:8765
 ```
 
@@ -65,6 +65,8 @@ Chi tiết về xử lý tên riêng (tên Latinh mà TTS tiếng Việt / Trung
 
 ## 4. Chạy trên Thiết bị Phần cứng Thật (HSPTEK AIBOX 8550)
 
+Bản tích hợp (Plan-01 + ASR speed/accuracy): profile mặc định, dựng gói với `--asr-config`, fallback trên box → [`docs/aibox8550_integration.md`](docs/aibox8550_integration.md).
+
 Khởi động phiên kiểm tra toàn diện đầu tiên trên thiết bị:
 ```bash
 bash tools/session0.sh      # Khảo sát môi trường + cài đặt + kiểm tra golden từng graph + smoke test + benchmark nhanh (kết quả đóng gói dạng .tgz)
@@ -87,7 +89,7 @@ Tệp cấu hình `models/models.json` ánh xạ tên các thành phần tới �
 | Đường dẫn | Mục đích sử dụng |
 |---|---|
 | `s2s_edge/` | Gói thư viện chính: `audio` (I/O, VAD), `asr`, `mt`, `tts`, `textnorm`, `backends` (ONNX Runtime, QNN), `registry`, `pipeline`, `bench`, `__main__` (CLI) |
-| `s2s_web.py` | Web Dashboard trực quan chạy localhost: mic thu âm, dịch văn bản, nghe TTS, đo latency |
+| `s2s_dashboard.py` | Web Dashboard trực quan chạy localhost: mic thu âm, dịch văn bản, nghe TTS, đo latency |
 | `docs/VNG_SETUP.md` | Hướng dẫn kết nối và cấu hình thực địa trên phần cứng AIBOX 8550 tại VNG |
 | `tools/recon.sh` | Script tự động khảo sát môi trường (OS, SoC, QNN libs, thiết bị âm thanh, mạng) |
 | `tools/session0.sh` | Chuỗi tự động chạy đầu tiên trên thiết bị, đóng gói log thành `.tgz` |

@@ -7,7 +7,7 @@ from s2s_edge.audio import load_audio,save_wav,concat_results,segment,SR
 
 ap=argparse.ArgumentParser(description='Run single-direction E2E translation on an audio file.')
 ap.add_argument('pos',nargs='*')
-ap.add_argument('--vad-profile',default=None,choices=['legacy','upstream'])
+ap.add_argument('--vad-profile',default=None,choices=['hybrid','legacy','upstream'])
 ap.add_argument('--ort-policy',default=None,choices=['auto','basic','disable'])
 ap.add_argument('--source-mode',default=None,choices=['0','1'])
 ap.add_argument('--tts-format',default=None,choices=['hybrid','legacy'])
@@ -25,7 +25,7 @@ if profile['source_mode']=='1':
  audit=out/f'{src}_to_{tgt}_normalization.jsonl';audit.write_text('')
  os.environ.setdefault('S2S_TN_AUDIT',str(audit))
 start=time.perf_counter()
-r=Registry(str(ROOT/'models/models.cpu.json'),'cpu',ort_policy=profile['ort_policy'],vad_profile=profile['vad_profile'],source_mode=profile['source_mode'],tts_format=profile['tts_format'])
+r=Registry(os.environ.get('S2S_MODELS',str(ROOT/'models/models.cpu.json')),os.environ.get('S2S_BACKEND','cpu'),ort_policy=profile['ort_policy'],vad_profile=profile['vad_profile'],source_mode=profile['source_mode'],tts_format=profile['tts_format'])
 t=Translator(r,src,tgt,vad_profile=profile['vad_profile'])
 raw_asr=[]
 class RecordAsr:

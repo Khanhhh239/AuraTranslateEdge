@@ -5,8 +5,8 @@ sentencepiece
 kaldi-native-fbank
 onnxruntime
 psutil
-python-crfsuite
-# optional
+# optional (install.sh installs them when the wheelhouse has them; the pipeline runs without them)
+python-crfsuite      # identifier CRF of the hybrid TTS normalizer; without it: context grammars only
 sounddevice
 jiwer
 sacrebleu
