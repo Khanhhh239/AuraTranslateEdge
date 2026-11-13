@@ -1,5 +1,7 @@
 # s2s_edge — offline speech-to-speech translation (vi ⇄ en / zh / ko) for Qualcomm Dragonwing IQ-9075
 
+> **TTS format hybrid:** Mặc định mới cho VI/EN/KO/ZH; xem [hướng dẫn bàn giao, test và PDF](docs/tts_format/README.md). Dùng `S2S_TTS_FORMAT=legacy` để quay lại baseline. Thay đổi này không thay model ASR/MT hoặc khẳng định đã kiểm chất lượng nghe trên mọi câu.
+
 OneVoice AI Challenge 2026, Phase 3 prototype. Audio in → translated audio out, **all inference on the device, no network**.
 Six directions: vi→en, vi→zh, vi→ko, en→vi, zh→vi, ko→vi (one side is always Vietnamese).
 

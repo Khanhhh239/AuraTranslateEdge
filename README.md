@@ -1,5 +1,7 @@
 # OneVoice — Offline Edge Speech-Translation Device
 
+> **Branch `feat/tts-hybrid-format`:** Nâng cấp format TTS bốn ngôn ngữ trên runtime `contest_VNG`. [Bắt đầu tại hướng dẫn bàn giao](s2s_edge/docs/tts_format/README.md) - có lệnh pull, test, cấu hình model và báo cáo PDF.
+
 Streaming ASR → MT → TTS cascade for Vietnamese ↔ English/Chinese/Korean, designed for offline, on-device
 operation on Qualcomm Snapdragon hardware (noisy factory/construction/logistics environments).
 Built for the **OneVoice AI Challenge** (Saigon AI Hub × Qualcomm).
