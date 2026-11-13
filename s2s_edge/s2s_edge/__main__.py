@@ -45,8 +45,12 @@ def main():
     ap.add_argument("--continuous", action="store_true", help="live mode without pressing Enter: always listening, translate and speak after each utterance")
     ap.add_argument("--no-warmup", action="store_true", help="live mode: skip loading + running every needed graph once before the first utterance")
     ap.add_argument("--no-stream", action="store_true", help="live mode: translate the whole utterance before playing (default: sentence-pipelined playback)")
+    ap.add_argument("--vad-profile", default=None, choices=["legacy", "upstream"])
+    ap.add_argument("--ort-policy", default=None, choices=["auto", "basic", "disable"])
+    ap.add_argument("--source-mode", default=None, choices=["0", "1"])
+    ap.add_argument("--tts-format", default=None, choices=["hybrid", "legacy"])
     a = ap.parse_args()
-    reg = Registry(a.models, a.backend, a.glossary)
+    reg = Registry(a.models, a.backend, a.glossary, ort_policy=a.ort_policy, vad_profile=a.vad_profile, source_mode=a.source_mode, tts_format=a.tts_format)
     if a.pair: dirs = [("vi", x) for x in a.pair.split(",") if x != "vi"] + [(x, "vi") for x in a.pair.split(",") if x != "vi"]
     elif a.auto: dirs = list(DIRECTIONS)
     else: dirs = [(a.src, a.tgt)]

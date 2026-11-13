@@ -6,15 +6,19 @@ from . import hybrid_textnorm, neural_textnorm
 from .textnorm import normalize as legacy_normalize
 
 
-def mode():
-    value = os.environ.get('S2S_TTS_FORMAT', 'hybrid')
+def resolve_mode(tts_format=None):
+    value = os.environ.get('S2S_TTS_FORMAT', 'hybrid') if tts_format is None else str(tts_format)
     if value not in ('hybrid', 'legacy', 'neural'):
         raise ValueError('S2S_TTS_FORMAT must be hybrid, legacy or neural')
     return value
 
 
-def prepare(text, lang):
-    selected = mode()
+def mode(tts_format=None):
+    return resolve_mode(tts_format)
+
+
+def prepare(text, lang, mode=None):
+    selected = resolve_mode(mode)
     if selected == 'hybrid':
         return hybrid_textnorm.normalize(text, lang)
     if selected == 'neural' and lang in ('en', 'vi'):

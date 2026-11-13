@@ -122,25 +122,101 @@ def normalize(text, lang):
 
 
 # Vietnamese ASR output is lower case without punctuation; NLLB then reads questions as statements ("anh cần thêm dây không" -> "I need more wires.").
+_VI_VOCATIVES = {"anh", "chị", "em", "bác", "chú", "cô", "bạn", "mình", "ông", "bà", "ạ", "nhé", "nha", "vậy", "thế", "ha", "hả", "nè", "nhỉ", "ơi"}
 _VI_Q_LAST = {"không", "chưa", "à", "ư", "hả", "hở", "nhỉ", "sao", "gì", "đâu", "nào", "chứ", "hử", "ai", "mấy", "chăng"}
-_VI_Q_WORDS = re.compile(r"\b(bao nhiêu|bao lâu|bao giờ|thế nào|như nào|ở đâu|đi đâu|đến đâu|tại sao|vì sao|làm sao|khi nào|lúc nào|mấy|có phải|phải không|được không|hay là)\b"
-                         r"|\b\w+ nào\b(?! cũng)|\bgì\b|\b\w+ hay \w+")
-_VI_NOT_Q = re.compile(r"\b(không sao|không có gì|chẳng sao|có gì đâu|gì cả|gì đâu|gì cũng|nào cũng|rất hay|thường hay|hay quá|hay lắm)\b"
-                       r"|\b(biết|hiểu|nhớ|hỏi)\b.*\b(gì|đâu|nào|sao|mấy|bao|không)\b")      # "tôi không biết khi nào ..." is a statement
-_VI_NEG_DAU = re.compile(r"\b(không|chưa|chẳng|gì)\b.*\bđâu$")                                 # "chưa quá đông đâu": negation, not "where"
+_VI_Q_WORDS = re.compile(
+    r"\b(bao nhiêu|bao lâu|bao giờ|thế nào|như nào|ở đâu|đi đâu|đến đâu|từ đâu|tại sao|vì sao|làm sao|khi nào|lúc nào|mấy|có phải|phải không|được không|hay là|đúng không)\b"
+    r"|\b\w+ nào\b(?! cũng)|\bgì\b|\b\w+ hay \w+|\bsao\b.*\b(thế|vậy)\b"
+)
+_VI_NOT_Q = re.compile(
+    r"\b(không sao|không có gì|chẳng sao|có gì đâu|gì cả|gì đâu|gì cũng|nào cũng|rất hay|thường hay|hay quá|hay lắm)\b"
+    r"|\b(tôi|chúng tôi|em|mình)\s+(không|chưa)\s+(biết|hiểu|nhớ|rõ)\b"
+)
+_VI_NEG_DAU = re.compile(r"\b(không|chưa|chẳng|gì)\b.*\bđâu$")
+_VI_EXCLAM_WORDS = re.compile(
+    r"\b(cẩn thận|chú ý|nguy hiểm|dừng lại|coi chừng|mau lên|nhanh lên|tuyệt vời|chúc mừng|hoan hô|xin chào)\b"
+)
+_VI_EXCLAM_LAST = {"quá", "lắm", "nào"}
+_VI_NUMBER_WORDS = set("không một hai ba bốn tư năm lăm sáu bảy tám chín mười mươi trăm nghìn ngàn triệu tỷ lẻ linh phẩy âm".split())
+
+_SPLIT_PATTERNS = [
+    (re.compile(r"^(xin chào|chào (?:anh|chị|em|bạn|bác|chú|cô|mọi người))\s+(?=(?:tôi|chúng tôi|em|mình|cho)\b)", re.IGNORECASE), r"\1! "),
+    (re.compile(r"^(vâng|đúng rồi|được rồi|dạ|ừ|chắc chắn rồi)\s+(?=(?:tôi|chúng tôi|em|mình|chúng ta|anh|chị)\b)", re.IGNORECASE), r"\1. "),
+    (re.compile(r"\b(được không|đúng không|phải không|hay không)((?:\s+(?:anh|chị|em|bác|chú|cô|bạn|ạ|nhé|nha))?)\s+(?!(?:thì|hay|mà|nên|rồi|chứ|vậy|nhỉ|à|ư)\b)(?=\S+\s+\S+)", re.IGNORECASE), r"\1\2? "),
+    (re.compile(r"\b(hài lòng|xong rồi|đủ rồi|tốt rồi|được rồi|cảm ơn(?:\s+(?:anh|chị|em|bác|cô|chú|bạn|ạ))?)\s+(?=(?:bao nhiêu tiền|hết bao nhiêu|mất bao nhiêu|tổng cộng)\b)", re.IGNORECASE), r"\1. "),
+    (re.compile(r"\b(chút đi|sớm đi|trước đi|ngay đi|thôi đi)\s+(?=.+\b(?:thế nào|như nào|mấy giờ|ở đâu|được không)\b)", re.IGNORECASE), r"\1. "),
+]
+
+_VI_CAP_SUBS = [
+    (re.compile(r"\bthứ\s+(hai|ba|tư|năm|sáu|bảy)\b", re.IGNORECASE), lambda m: "thứ " + m.group(1).capitalize()),
+    (re.compile(r"\bchủ nhật\b", re.IGNORECASE), lambda _: "Chủ nhật"),
+    (re.compile(r"\b(việt nam|hà nội|hồ chí minh|sài gòn|đà nẵng|trung quốc|hàn quốc|nhật bản|hoa kỳ|châu âu|châu á)\b", re.IGNORECASE), lambda m: m.group(1).title()),
+    (re.compile(r"\btiếng\s+(việt|anh|hàn|trung|nhật|pháp|đức)\b", re.IGNORECASE), lambda m: "tiếng " + m.group(1).capitalize()),
+]
+
+
+def _cap_vi(s):
+    for pat, repl in _VI_CAP_SUBS:
+        s = pat.sub(repl, s)
+    return s[:1].upper() + s[1:]
+
+
+def _punct_clause(c):
+    c = c.strip()
+    if not c: return ""
+    last_mark = c[-1] if c[-1] in ".?!" else None
+    s = c[:-1].strip() if last_mark else c
+    words = s.lower().split()
+    if not words: return c
+
+    i = len(words) - 1
+    while i > 0 and words[i] in _VI_VOCATIVES:
+        i -= 1
+    core_last = words[i]
+    low = " ".join(words)
+    tail = low if len(words) <= 12 else " ".join(words[-6:])
+
+    # 1. Question check
+    is_q = core_last in _VI_Q_LAST or bool(_VI_Q_WORDS.search(tail))
+    if _VI_NOT_Q.search(low) and core_last not in ("không", "chưa", "à", "ư", "hả", "nhỉ", "chứ", "đúng không", "phải không"):
+        is_q = False
+    if core_last == "đâu" and _VI_NEG_DAU.search(s.lower()):
+        is_q = False
+    if core_last in ("không", "chưa") and len(words) <= 2 and words[0] in ("không", "chưa", "tôi", "em"):
+        is_q = False
+    # CAPU can split a spoken numeric sequence into clauses. A numeric zero
+    # at the end of such a statement is not a yes/no question particle.
+    numeric_words = [w.strip(',;:') for w in words]
+    numeric_clause = all(w in _VI_NUMBER_WORDS or w.isdecimal() for w in numeric_words)
+    call_zero = bool(re.search(r'\b(?:gọi|liên hệ)\b.*\bsố\s+không$', low))
+    if last_mark == '.' and core_last == 'không' and (numeric_clause or call_zero):
+        is_q = False
+
+    # 2. Exclamation check
+    is_ex = bool(_VI_EXCLAM_WORDS.search(low)) or (core_last in _VI_EXCLAM_LAST and not is_q)
+    # A declarative "I don't know when/which ..." must not become an
+    # exclamation merely because the final word is "nào".
+    if _VI_NOT_Q.search(low):
+        is_ex = False
+    if is_ex and core_last in ("nào", "sao"):
+        is_q = False
+
+    mark = "?" if is_q else ("!" if is_ex else ".")
+    if last_mark == "?" and is_q: mark = "?"
+    elif last_mark == "!" and is_ex: mark = "!"
+
+    return _cap_vi(s) + mark
 
 
 def vi_punct(text):
-    """Restore sentence case and a final '?' or '.' on a Vietnamese ASR transcript (rule based: question particles and question words).
-    Measured on the 431 Vietnamese sentences of the organisers' sample set (punctuation removed, then restored): see docs/aibox8550_report.md."""
+    """Restore sentence capitalization, punctuation ('?', '!', '.') and clause splitting on Vietnamese ASR transcripts.
+    Ensures interrogative and imperative contexts are preserved for accurate downstream NLLB MT translation."""
     t = re.sub(r"\s+", " ", text).strip()
     if not t: return t
-    if t[-1] in ".?!": return t[:1].upper() + t[1:]
-    words = t.lower().split(); core = words[:-1] if len(words) > 1 and words[-1] in ("ạ", "nhé", "vậy", "thế", "ha", "hả") and words[-2] in _VI_Q_LAST else words
-    low = " ".join(words); last = core[-1]
-    tail = low if len(words) <= 12 else " ".join(words[-5:])                    # question words inside long sentences are mostly relative ("điều gì thúc đẩy ...")
-    q = last in _VI_Q_LAST or bool(_VI_Q_WORDS.search(tail))
-    if _VI_NOT_Q.search(low) and last not in ("không", "chưa", "à", "ư", "hả", "nhỉ", "chứ"): q = False
-    if last == "đâu" and _VI_NEG_DAU.search(" ".join(core)): q = False
-    if last in ("không", "chưa") and len(core) <= 2 and core[0] in ("không", "chưa", "tôi", "em"): q = False        # bare "không" / "tôi chưa" answers
-    return t[:1].upper() + t[1:] + ("?" if q else ".")
+
+    for pat, repl in _SPLIT_PATTERNS:
+        t = pat.sub(repl, t)
+
+    raw_clauses = [c.strip() for c in re.split(r"(?<=[.?!])\s+", t) if c.strip()]
+    out = [_punct_clause(c) for c in raw_clauses]
+    return " ".join(out)

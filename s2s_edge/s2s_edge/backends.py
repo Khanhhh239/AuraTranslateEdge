@@ -24,12 +24,70 @@ class Graph:
         pass
 
 
+ORT_POLICIES = ("auto", "basic", "disable")
+DEFAULT_ORT_POLICY = "auto"
+
+
+def resolve_ort_policy(ort_policy=None) -> str:
+    """Resolve explicit ORT session optimization policy ('auto', 'basic', 'disable')."""
+    if ort_policy is None:
+        env_pol = os.environ.get("S2S_ORT_POLICY")
+        pol = env_pol if (env_pol is not None and env_pol != "") else DEFAULT_ORT_POLICY
+    else:
+        pol = ort_policy
+    if not isinstance(pol, str) or not pol.strip():
+        raise ValueError(f"Unsupported ort_policy {pol!r}; expected one of {ORT_POLICIES}")
+    key = pol.strip().lower()
+    if key not in ORT_POLICIES:
+        raise ValueError(f"Unsupported ort_policy {pol!r}; expected one of {ORT_POLICIES}")
+    return key
+
+
 class OrtGraph(Graph):
-    def __init__(self, path, name=None):
+    def __init__(self, path, name=None, ort_policy=None):
         super().__init__(); import onnxruntime as ort
-        so = ort.SessionOptions(); so.log_severity_level = 3; so.enable_cpu_mem_arena = False; so.enable_mem_pattern = False
-        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
-        self.s = ort.InferenceSession(path, so, providers=["CPUExecutionProvider"]); self.name = name or os.path.basename(path)
+        self.path = path
+        self.ort_policy = resolve_ort_policy(ort_policy)
+        self.external_data = os.path.exists(path + ".data")
+        self.size_bytes = os.path.getsize(path) if os.path.exists(path) else None
+        self.large_or_ext = self.external_data or (self.size_bytes is not None and self.size_bytes > 200_000_000)
+
+        if self.ort_policy == "disable":
+            plan = [("ORT_DISABLE_ALL", ort.GraphOptimizationLevel.ORT_DISABLE_ALL)]
+        elif self.ort_policy == "basic":
+            plan = [
+                ("ORT_ENABLE_BASIC", ort.GraphOptimizationLevel.ORT_ENABLE_BASIC),
+                ("ORT_DISABLE_ALL", ort.GraphOptimizationLevel.ORT_DISABLE_ALL),
+            ]
+        else:
+            if self.large_or_ext:
+                plan = [("ORT_DISABLE_ALL", ort.GraphOptimizationLevel.ORT_DISABLE_ALL)]
+            else:
+                plan = [
+                    ("ORT_ENABLE_BASIC", ort.GraphOptimizationLevel.ORT_ENABLE_BASIC),
+                    ("ORT_DISABLE_ALL", ort.GraphOptimizationLevel.ORT_DISABLE_ALL),
+                ]
+
+        self.ort_attempts = []
+        self.effective_ort_level = None
+        self.ort_fallback = False
+        last_exc = None
+        for idx, (level_name, level_enum) in enumerate(plan, start=1):
+            so = ort.SessionOptions(); so.log_severity_level = 3; so.enable_cpu_mem_arena = False; so.enable_mem_pattern = False
+            so.graph_optimization_level = level_enum
+            try:
+                self.s = ort.InferenceSession(path, so, providers=["CPUExecutionProvider"])
+                self.ort_attempts.append({"attempt": idx, "level": level_name, "ok": True})
+                self.effective_ort_level = level_name
+                self.ort_fallback = idx > 1
+                last_exc = None
+                break
+            except Exception as exc:
+                self.ort_attempts.append({"attempt": idx, "level": level_name, "ok": False, "error": repr(exc)[:300]})
+                last_exc = exc
+        if last_exc is not None:
+            raise last_exc
+        self.name = name or os.path.basename(path)
         self.in_names = [i.name for i in self.s.get_inputs()]
         self.in_types = {i.name: {"tensor(int64)": np.int64, "tensor(int32)": np.int32, "tensor(float)": np.float32, "tensor(float16)": np.float16}.get(i.type, np.float32) for i in self.s.get_inputs()}
 
@@ -38,6 +96,19 @@ class OrtGraph(Graph):
 
     def release(self):
         self.s = None
+
+    def ort_info(self):
+        return {
+            "name": self.name,
+            "path": self.path,
+            "size_bytes": self.size_bytes,
+            "external_data": self.external_data,
+            "large_or_ext": self.large_or_ext,
+            "ort_policy": self.ort_policy,
+            "effective_ort_level": self.effective_ort_level,
+            "ort_fallback": self.ort_fallback,
+            "attempts": list(self.ort_attempts),
+        }
 
 
 _NP = {"float": np.float32, "float32": np.float32, "float16": np.float16, "int32": np.int32, "int64": np.int64, "uint8": np.uint8, "int8": np.int8, "uint16": np.uint16, "int16": np.int16, "uint32": np.uint32}
@@ -112,8 +183,8 @@ class QnnGraph(Graph):
         self.ctx = None
 
 
-def make_graph(model_dir, spec, backend):
+def make_graph(model_dir, spec, backend, ort_policy=None):
     """spec: {'onnx': relative path (cpu ref), 'ctx': relative path (npu), 'in': [...], 'out': [...]}"""
-    if backend == "cpu": return OrtGraph(os.path.join(model_dir, spec["onnx"]), spec.get("name"))
+    if backend == "cpu": return OrtGraph(os.path.join(model_dir, spec["onnx"]), spec.get("name"), ort_policy=ort_policy)
     if backend == "npu": return QnnGraph(os.path.join(model_dir, spec["ctx"]), spec.get("name"), spec.get("in"), spec.get("out"))
     raise ValueError(backend)

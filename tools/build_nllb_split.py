@@ -42,7 +42,7 @@ class Decoder(nn.Module):
   if B==1:return b.inv[logits.argmax(-1)].int(),k.squeeze(1),v.squeeze(1)
   return logits,k,v
 print('LOAD_HF',flush=True)
-hf=AutoModelForSeq2SeqLM.from_pretrained(str(root.parent/'AuraTranslateEdge/output/s2s-original-2026-11-12/models/nllb-hf')).eval()
+hf=AutoModelForSeq2SeqLM.from_pretrained(str(root/'models/source/nllb-hf')).eval()
 keep=np.load(root/'s2s_edge/assets/nllb_keep.npy').tolist();base=NLLBStatic(hf,S=S,T=T,keep_ids=keep,half_emb=True).eval();del hf;gc.collect()
 out=root/'build/nllb';out.mkdir(exist_ok=True)
 a=torch.ones(1,S,dtype=torch.int32);a[0,:3]=torch.tensor([256047,35378,2],dtype=torch.int32)

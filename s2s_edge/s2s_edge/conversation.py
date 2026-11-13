@@ -29,7 +29,7 @@ def restore_vi(text):
         from .punct_vi import get
         from .registry import ASSETS
         m = get(ASSETS)
-        if m is not None: return m(text)
+        if m is not None: return vi_punct(m(text))
     return vi_punct(text)
 
 HANGUL = re.compile(r"[가-힣ᄀ-ᇿ]"); HAN = re.compile(r"[一-鿿]"); LATIN = re.compile(r"[A-Za-z]")
@@ -46,6 +46,13 @@ class Engine:
 
     def __init__(self, registry, denoise=False):
         self.r = registry; self._asr = {}; self._tts = {}; self._mt = None; self.names = None; self.denoise = denoise; self._den = None
+        prof = getattr(registry, "profile", None)
+        if getattr(registry, "source_mode", None) is not None:
+            self.source_mode = str(registry.source_mode)
+        elif isinstance(prof, dict) and prof.get("source_mode") is not None:
+            self.source_mode = str(prof["source_mode"])
+        else:
+            self.source_mode = None
 
     def prep(self, wav):
         """Level normalisation (+ optional GTCRN speech enhancement on the CPU) before ASR."""
@@ -75,8 +82,15 @@ class Engine:
 
     def gtime(self, graphs): return sum(g.total_s for g in graphs), sum(g.calls for g in graphs)
 
+    def neural_enabled(self):
+        if self.source_mode is not None:
+            return self.source_mode == "1"
+        if getattr(self.r, "source_mode", None) is not None:
+            return str(self.r.source_mode) == "1"
+        return neural_textnorm.enabled()
+
     def prepare_text(self, text, src):
-        if text and src in ("vi", "en") and neural_textnorm.enabled():
+        if text and src in ("vi", "en") and self.neural_enabled():
             parts = neural_textnorm.get().prepare_source(text, src, self.mt.S - 2, self.mt.encode)
             return " ".join(parts), parts
         return (restore_vi(text) if src == "vi" and text and VI_PUNCT else text), None
@@ -169,8 +183,10 @@ class LanguageID:
 
 
 class Conversation:
-    def __init__(self, registry, pair=None, auto=False, partner="en", denoise=False):
+    def __init__(self, registry, pair=None, auto=False, partner="en", denoise=False, vad_profile=None):
+        from .registry import resolve_runtime_profile
         self.e = Engine(registry, denoise); self.lid = LanguageID(self.e); self.auto = auto; self.partner = partner
+        self.vad_profile = resolve_runtime_profile(vad_profile=vad_profile if vad_profile is not None else getattr(registry, "vad_profile", None))["vad_profile"]
         self.others = [l for l in (pair or ("vi", partner)) if l != "vi"] if not auto else ["en", "zh", "ko"]
         if not auto: self.partner = self.others[0]
 
@@ -182,17 +198,21 @@ class Conversation:
         if self.auto and text and len(re.sub(r"[\W_]+", "", text)) >= 3: self.partner = src       # junk fragments must not change the partner language
         return src, "vi", text, st
 
-    def translate(self, wav, max_seg_s=12.0):
+    def translate(self, wav, max_seg_s=12.0, vad_profile=None):
+        from .registry import resolve_runtime_profile
+        prof = resolve_runtime_profile(vad_profile=vad_profile if vad_profile is not None else self.vad_profile)["vad_profile"]
         out = []
-        for a, b in segment(wav, max_s=max_seg_s):
+        for a, b in segment(wav, max_s=max_seg_s, vad_profile=prof):
             seg = self.e.prep(wav[a:b]); src, tgt, text, st = self.route(seg); r = self.e.translate_segment(seg, src, tgt, text=text, prepped=True)
             r["span"] = (a / SR, b / SR); r["lid"] = st
             if r["mt"]: out.append(r)
         return out
 
-    def translate_stream(self, wav, max_seg_s=12.0):
+    def translate_stream(self, wav, max_seg_s=12.0, vad_profile=None):
         """Generator: one result per sentence as soon as its audio is ready (see Engine.translate_segment_stream)."""
-        for a, b in segment(wav, max_s=max_seg_s):
+        from .registry import resolve_runtime_profile
+        prof = resolve_runtime_profile(vad_profile=vad_profile if vad_profile is not None else self.vad_profile)["vad_profile"]
+        for a, b in segment(wav, max_s=max_seg_s, vad_profile=prof):
             seg = self.e.prep(wav[a:b]); src, tgt, text, st = self.route(seg)
             for r in self.e.translate_segment_stream(seg, src, tgt, text=text, prepped=True):
                 r["span"] = (a / SR, b / SR); r["lid"] = st

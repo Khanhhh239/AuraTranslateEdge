@@ -55,5 +55,17 @@
       "supertonic_npu"
     ],
     "destination": "components"
+  },
+  "asr-improvement": {
+    "commit": "1e5231886dbf4af5bb0a6ff722bfa16223f8f3a6",
+    "paths": [
+      "s2s_edge/s2s_edge/audio.py",
+      "s2s_edge/s2s_edge/textnorm.py",
+      "s2s_edge/s2s_edge/backends.py",
+      "s2s_edge/s2s_edge/conversation.py"
+    ],
+    "destination": ".",
+    "integration": "selective frontend/postprocessing/ORT changes, two local punctuation guards; no new ASR weights",
+    "report": "reports/asr_integration/REVIEW.md"
   }
 }

@@ -2,7 +2,7 @@ from pathlib import Path
 import torch,numpy as np,json,onnxruntime as ort
 from transformers import AutoTokenizer,AutoModelForSeq2SeqLM
 root=Path(__file__).resolve().parents[1];torch.set_num_threads(4)
-p=root.parent/'AuraTranslateEdge/output/s2s-original-2026-11-12/models/nllb-hf'
+p=root/'models/source/nllb-hf'
 t=AutoTokenizer.from_pretrained(str(p),src_lang='eng_Latn');m=AutoModelForSeq2SeqLM.from_pretrained(str(p)).eval()
 a=t('The ticket costs fifteen dollars.',return_tensors='pt');seq=a['input_ids'].numpy().astype(np.int32);x=np.ones((1,64),np.int32);x[0,:seq.shape[1]]=seq
 so=ort.SessionOptions();so.intra_op_num_threads=4;so.graph_optimization_level=ort.GraphOptimizationLevel.ORT_ENABLE_BASIC

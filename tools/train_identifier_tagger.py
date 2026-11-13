@@ -2,7 +2,7 @@ from pathlib import Path
 import json,sys,hashlib,pycrfsuite,random
 r=Path(__file__).resolve().parents[1];sys.path.insert(0,str(r/'s2s_edge'))
 from s2s_edge.identifier_tagger import tokens,features,IdentifierTagger
-source=r.parent/'AuraTranslateEdge/research/tts_format_benchmark/train_cases.json';data=json.loads(source.read_text())
+source=r/'research/tts_format_benchmark/train_cases.json';data=json.loads(source.read_text())
 # Extra training examples diversify character shapes and groupings. These are
 # supervised training data generation, not inference format handlers.
 rng=random.Random(73129);aug=[]

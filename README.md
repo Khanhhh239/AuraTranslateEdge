@@ -165,7 +165,7 @@ Hệ thống tích hợp sẵn web server để test âm thanh trực tiếp:
 ```bash
 python3 tools/s2s_web.py
 ```
-Mở trình duyệt truy cập `http://localhost:8000` (hoặc cổng hiển thị trong log) để tải file âm thanh hoặc thu âm trực tiếp và quan sát kết quả dịch tức thì.
+Mở trình duyệt truy cập `http://localhost:8766` (hoặc cổng hiển thị trong log) để tải file âm thanh hoặc thu âm trực tiếp và quan sát kết quả dịch tức thì.
 
 ### 6.4. Tái tạo Báo cáo PDF Bất kỳ lúc nào
 Nếu muốn cập nhật số liệu hoặc tạo lại file PDF báo cáo:
@@ -173,3 +173,7 @@ Nếu muốn cập nhật số liệu hoặc tạo lại file PDF báo cáo:
 python3 tools/create_hybrid_tts_report.py
 ```
 File PDF sẽ được xuất thẳng vào thư mục `reports/bao-cao-format-tts-hybrid.pdf`.
+
+## Tích hợp asr-improvement (13/11/2026)
+
+Đã fetch và tích hợp chọn lọc VAD, hậu xử lý dấu câu/viết hoa VI và ORT fallback từ commit `1e52318`; không thay weights ASR hoặc TTS hybrid. 22 nhóm test và 6 chiều S2S trước/sau đã chạy. Còn lỗi số liệu ASR/MT và tradeoff latency; xem [báo cáo tích hợp](reports/asr_integration/REVIEW.md). Với `S2S_NEURAL_TN=0`, đường VI là CAPU + vi_punct nâng cấp; chế độ neural nguồn cũ vẫn được giữ riêng.

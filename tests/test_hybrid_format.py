@@ -8,7 +8,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT/'s2s_edge'))
+sys.path.insert(1, str(ROOT/'s2s_edge'))
 from s2s_edge.hybrid_textnorm import HybridNormalizer
 from s2s_edge.tts_format import chunks
 

@@ -48,7 +48,62 @@ def normalize_level(x, target_peak=0.5, below=0.2):
     return (x * (target_peak / pk)).astype(np.float32) if 1e-5 < pk < below else x
 
 
-def segment(x, sr=SR, max_s=12.0, min_s=0.3, frame_ms=20, pad_ms=150, min_sil_ms=500, merge_gap_s=1.5, short_s=3.0):
+VAD_PROFILES = {
+    "legacy": {"pad_ms": 150, "min_sil_ms": 500, "merge_gap_s": 1.5, "short_s": 3.0},
+    "upstream": {"pad_ms": 120, "min_sil_ms": 320, "merge_gap_s": 0.32, "short_s": 1.1},
+}
+DEFAULT_VAD_PROFILE = "legacy"
+
+
+def get_vad_options(profile: str) -> dict:
+    """Return VAD segmentation parameters for the named profile ('legacy' or 'upstream')."""
+    if not isinstance(profile, str) or not profile.strip():
+        raise ValueError(f"Unsupported vad_profile {profile!r}; expected one of {tuple(VAD_PROFILES)}")
+    key = profile.strip().lower()
+    if key not in VAD_PROFILES:
+        raise ValueError(f"Unsupported vad_profile {profile!r}; expected one of {tuple(VAD_PROFILES)}")
+    return dict(VAD_PROFILES[key])
+
+
+def resolve_vad_options(
+    vad_profile=None,
+    pad_ms=None,
+    min_sil_ms=None,
+    merge_gap_s=None,
+    short_s=None,
+):
+    """Resolve effective VAD profile and parameter dict without altering explicit caller values."""
+    if vad_profile is None:
+        env_prof = os.environ.get("S2S_VAD_PROFILE")
+        prof = env_prof if (env_prof is not None and env_prof != "") else DEFAULT_VAD_PROFILE
+    else:
+        prof = vad_profile
+    opts = get_vad_options(prof)
+    norm_prof = prof.strip().lower()
+    if pad_ms is not None:
+        opts["pad_ms"] = pad_ms
+    if min_sil_ms is not None:
+        opts["min_sil_ms"] = min_sil_ms
+    if merge_gap_s is not None:
+        opts["merge_gap_s"] = merge_gap_s
+    if short_s is not None:
+        opts["short_s"] = short_s
+    return norm_prof, opts
+
+
+def segment(x, sr=SR, max_s=12.0, min_s=0.3, frame_ms=20, pad_ms=None, min_sil_ms=None, merge_gap_s=None, short_s=None, vad_profile=None):
+    """Split a recording into utterances at pauses. Resolves vad_profile ('legacy' default, 'upstream' opt-in) without altering explicit caller args."""
+    _, _vad = resolve_vad_options(
+        vad_profile=vad_profile,
+        pad_ms=pad_ms,
+        min_sil_ms=min_sil_ms,
+        merge_gap_s=merge_gap_s,
+        short_s=short_s,
+    )
+    pad_ms = _vad["pad_ms"]
+    min_sil_ms = _vad["min_sil_ms"]
+    merge_gap_s = _vad["merge_gap_s"]
+    short_s = _vad["short_s"]
     """Split a recording into utterances at pauses. Adaptive threshold from the quietest 10% of frames (works with fan noise).
     Segments longer than max_s are cut at the quietest frame in their last 40% (never mid-word if a pause exists).
     Returns a list of (start_sample, end_sample)."""

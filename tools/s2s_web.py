@@ -10,12 +10,19 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'s2s_edge'))
 os.environ.setdefault('S2S_NEURAL_TN','1')
 os.environ.setdefault('S2S_TTS_FORMAT','hybrid')
+os.environ.setdefault('S2S_VAD_PROFILE','legacy')
+os.environ.setdefault('S2S_ORT_POLICY','auto')
 os.environ.setdefault('HF_HOME','/private/tmp/s2s-hf')
 MAX_BYTES=2*1024*1024
+from s2s_edge.registry import resolve_runtime_profile, runtime_code_fingerprint
 
 class Service:
- def __init__(self,out):
+ def __init__(self,out,vad_profile=None,ort_policy=None,source_mode=None,tts_format=None):
   self.out=out;out.mkdir(parents=True,exist_ok=True);self.jobs={};self.lock=threading.RLock();self.pool=ThreadPoolExecutor(max_workers=1,thread_name_prefix='s2s')
+  self.vad_profile_arg=vad_profile;self.ort_policy_arg=ort_policy;self.source_mode_arg=source_mode;self.tts_format_arg=tts_format
+  self.profile=resolve_runtime_profile(vad_profile=vad_profile,ort_policy=ort_policy,source_mode=source_mode,tts_format=tts_format)
+  self.loaded_code_fingerprint=runtime_code_fingerprint(extra_files=[str(Path(__file__).resolve())])
+  self.code_fingerprint=self.loaded_code_fingerprint
  def update(self,key,**fields):
   with self.lock:self.jobs[key].update(fields)
  def submit(self,data,src):
@@ -44,7 +51,8 @@ class Service:
    os.environ['S2S_TN_AUDIT']=str(folder/'normalization.jsonl')
    w=load_audio(str(folder/'input.wav'))
    if not len(w) or not np.isfinite(w).all() or float(np.max(abs(w)))<1e-5:raise ValueError('Bản thu không có tín hiệu. Hãy kiểm tra mic và nói lại.')
-   reg=Registry(str(ROOT/'models/models.cpu.json'),'cpu');translator=Translator(reg,src,tgt)
+   profile=dict(self.profile)
+   reg=Registry(str(ROOT/'models/models.cpu.json'),'cpu',ort_policy=profile['ort_policy'],vad_profile=profile['vad_profile'],source_mode=profile['source_mode'],tts_format=profile['tts_format']);translator=Translator(reg,src,tgt,vad_profile=profile['vad_profile'])
    raw=[];service=self
    class ASR:
     def __init__(self,m):self.m=m
@@ -61,9 +69,10 @@ class Service:
     def __getattr__(self,n):return getattr(self.m,n)
     def synthesize(self,text):service.update(key,stage='Đang chuẩn hóa và tạo giọng nói…');return self.m.synthesize(text)
    translator.e._asr[src]=ASR(translator.asr);translator.e._mt=MT(translator.e._mt);translator.e._tts[tgt]=TTS(translator.tts)
-   spans=segment(w,max_s=min(translator.asr.max_s,12.0));results=[]
+   spans=segment(w,max_s=min(translator.asr.max_s,12.0),vad_profile=profile['vad_profile']);results=[]
    if not spans:raise ValueError('Chưa nhận ra lời nói. Hãy nói rõ hơn và đưa mic lại gần.')
-   trace_start=len(neural_textnorm.get().records) if neural_textnorm.enabled() else 0
+   neural_active=translator.e.neural_enabled()
+   trace_start=len(neural_textnorm.get().records) if neural_active else 0
    for i,(a,b) in enumerate(spans):
     self.update(key,segment=i+1,segments_total=len(spans))
     result=translator.translate_segment(w[a:b]);result['asr_raw']=raw[-1];result['span']=[a/SR,b/SR];results.append(result)
@@ -71,7 +80,8 @@ class Service:
    if not len(audio):raise ValueError('Không nhận được nội dung để dịch. Hãy nói lại một câu ngắn, rõ hơn.')
    if not np.isfinite(audio).all():raise RuntimeError('Mô hình trả về audio không hợp lệ.')
    save_wav(str(folder/'output.wav'),audio,sr)
-   result={'id':key,'status':'done','stage':'Hoàn tất','src':src,'tgt':tgt,'input_seconds':len(w)/SR,'output_seconds':len(audio)/sr,'elapsed_seconds':time.perf_counter()-start,'input_url':f'/audio/{key}/input.wav','output_url':f'/audio/{key}/output.wav','detail_url':f'/audio/{key}/result.json','asr':' '.join(z['asr_raw'] for z in results),'translation':' '.join(z['mt'] for z in results),'tts_text':' '.join(z['tts_text'] for z in results),'segments':[{k:v for k,v in z.items() if k!='wav'} for z in results],'normalization':neural_textnorm.get().records[trace_start:] if neural_textnorm.enabled() else [],'backend':'integrated ONNX CPU + learned normalization on Apple Metal','input_kind':'uploaded speech audio; no transcript provided'}
+   backend_label='integrated ONNX CPU + learned normalization on Apple Metal' if neural_active else 'integrated ONNX CPU (rule source preparation; neural_tn=0)'
+   result={'id':key,'status':'done','stage':'Hoàn tất','src':src,'tgt':tgt,'input_seconds':len(w)/SR,'output_seconds':len(audio)/sr,'elapsed_seconds':time.perf_counter()-start,'input_url':f'/audio/{key}/input.wav','output_url':f'/audio/{key}/output.wav','detail_url':f'/audio/{key}/result.json','asr':' '.join(z['asr_raw'] for z in results),'translation':' '.join(z['mt'] for z in results),'tts_text':' '.join(z['tts_text'] for z in results),'segments':[{k:v for k,v in z.items() if k!='wav'} for z in results],'normalization':neural_textnorm.get().records[trace_start:] if neural_active else [],'source_mode':profile['source_mode'],'effective_profile':profile,'ort_sessions':reg.graph_telemetry(),'code_fingerprint':self.code_fingerprint,'backend':backend_label,'input_kind':'uploaded speech audio; no transcript provided'}
    (folder/'result.json').write_text(json.dumps(result,ensure_ascii=False,indent=2));self.update(key,**{k:v for k,v in result.items() if k!='id'})
    print('DONE',key,src,tgt,round(result['elapsed_seconds'],2),flush=True)
   except Exception as e:
@@ -86,8 +96,7 @@ class Service:
    j=self.jobs.get(key)
    return dict(j) if j else None
 
-def main():
- ap=argparse.ArgumentParser();ap.add_argument('--port',type=int,default=8766);args=ap.parse_args();service=Service(ROOT/'results/mic_web')
+def build_handler(service, port):
  class Handler(BaseHTTPRequestHandler):
   def send(self,status,body,ctype='application/json; charset=utf-8'):
    self.send_response(status);self.send_header('Content-Type',ctype);self.send_header('Content-Length',str(len(body)));self.send_header('Cache-Control','no-store');self.send_header('X-Content-Type-Options','nosniff');self.send_header('Permissions-Policy','microphone=(self)');self.end_headers()
@@ -103,7 +112,8 @@ def main():
     name,ctype=static[path];return self.send(200,(ROOT/'web'/name).read_bytes(),ctype)
    if path=='/api/health':
     with service.lock:pending=sum(j['status'] in ('queued','running') for j in service.jobs.values())
-    return self.json(200,{'ok':True,'pending':pending,'max_seconds':30,'normalization':os.environ['S2S_NEURAL_TN']=='1','tts_format':os.environ['S2S_TTS_FORMAT']})
+    p=service.profile
+    return self.json(200,{'ok':True,'pid':os.getpid(),'pending':pending,'max_seconds':30,'normalization':p['source_mode']=='1','source_mode':p['source_mode'],'vad_profile':p['vad_profile'],'vad_options':p['vad_options'],'ort_policy':p['ort_policy'],'tts_format':p['tts_format'],'effective_profile':dict(p),'loaded_code_fingerprint':service.loaded_code_fingerprint,'code_fingerprint':service.code_fingerprint})
    if path.startswith('/api/jobs/'):
     j=service.snapshot(path.rsplit('/',1)[-1]);return self.json(200,j) if j else self.json(404,{'error':'Không tìm thấy bản thu.'})
    if path.startswith('/audio/'):
@@ -118,7 +128,7 @@ def main():
   def do_POST(self):
    if urlparse(self.path).path!='/api/jobs':return self.json(404,{'error':'Not found'})
    origin=self.headers.get('Origin')
-   if origin and origin not in (f'http://localhost:{args.port}',f'http://127.0.0.1:{args.port}'):return self.json(403,{'error':'Hãy mở trang trên localhost.'})
+   if origin and origin not in (f'http://localhost:{port}',f'http://127.0.0.1:{port}'):return self.json(403,{'error':'Hãy mở trang trên localhost.'})
    try:
     src=parse_qs(urlparse(self.path).query).get('src',[''])[0]
     if src not in ('en','vi'):raise ValueError('Hãy chọn chiều Anh → Việt hoặc Việt → Anh.')
@@ -130,6 +140,12 @@ def main():
    except ValueError as e:self.json(400,{'error':str(e)})
    except Exception:
     traceback.print_exc();self.json(500,{'error':'Không gửi được bản thu. Hãy thử lại.'})
+ return Handler
+
+def main():
+ ap=argparse.ArgumentParser();ap.add_argument('--port',type=int,default=8766);ap.add_argument('--out-dir',default=None);ap.add_argument('--vad-profile',default=None,choices=['legacy','upstream']);ap.add_argument('--ort-policy',default=None,choices=['auto','basic','disable']);ap.add_argument('--source-mode',default=None,choices=['0','1']);ap.add_argument('--tts-format',default=None,choices=['hybrid','legacy']);args=ap.parse_args()
+ service=Service(Path(args.out_dir) if args.out_dir else (ROOT/'results/mic_web'),vad_profile=args.vad_profile,ort_policy=args.ort_policy,source_mode=args.source_mode,tts_format=args.tts_format)
+ Handler=build_handler(service, args.port)
  print(f'OneVoice mic web: http://localhost:{args.port}',flush=True)
  ThreadingHTTPServer(('127.0.0.1',args.port),Handler).serve_forever()
 
