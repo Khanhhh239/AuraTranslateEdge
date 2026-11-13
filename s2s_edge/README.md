@@ -47,6 +47,12 @@ python s2s_web.py --port 8765
 
 ---
 
+### ASR: cửa sổ nhiều kích thước, RNN-T, đặc trưng SenseVoice trên host
+
+Mỗi ASR có thể có nhiều đồ thị tĩnh (khoá `asr_vi@<frame>`, `asr_xx_encoder@<frame LFR>` trong models.json); pipeline chạy cửa sổ nhỏ nhất vừa câu nói, nên câu 3 s không phải trả giá cửa sổ 15 s / 29 s. Zipformer tiếng Việt giải mã bằng nhánh RNN-T khi có `asr_vi_decoder` + `asr_vi_joiner`; SenseVoice tính đặc trưng trên host khi `"_sv_frontend": "host"`. Mẫu cấu hình: `models.dev_asr_buckets.json`. Chi tiết, số đo và cách build/link trên AI Hub: [`docs/asr_optimization.md`](docs/asr_optimization.md); đánh giá riêng ASR: `python tools/eval_asr.py`, kiểm tra nhanh không cần model: `python tools/test_asr_host.py`.
+
+---
+
 ## 3. Chế độ Hội thoại Đa ngữ
 
 ```bash
@@ -99,7 +105,7 @@ Tệp cấu hình `models/models.json` ánh xạ tên các thành phần tới �
 * **TTS Tiếng Trung:** Xử lý bằng bảng tra tĩnh: các chữ số được đọc thông qua `textnorm`, chữ cái Latinh và ký tự hiếm ngoài bảng bị lược bỏ.
 * **TTS Tiếng Việt (Piper):** Lược bỏ các từ ngoài bảng âm tiết (được ghi nhận trong `n_oov`).
 * **MT NLLB:** Đoạn câu nguồn tối đa $\le 30$ SentencePiece token; câu dài hơn được tự động ngắt theo dấu câu hoặc điểm giữa câu để dịch phân đoạn.
-* **Độ dài đoạn âm thanh:** Một phân đoạn tiếng nói tối đa $\le 14.5$ s (khớp cửa sổ Zipformer); âm thanh dài hơn được cắt ở khung tĩnh lặng nhất.
-* **VAD (Voice Activity Detector):** Sử dụng thuật toán năng lượng thích ứng theo mức tín hiệu thu âm (hoạt động tốt với cả micro độ nhạy thấp); không dùng mô hình nơ-ron VAD riêng để tiết kiệm tài nguyên NPU.
+* **Độ dài đoạn âm thanh:** Một phân đoạn tiếng nói tối đa 14 s (`S2S_SEG_MAX_S`, vừa cửa sổ Zipformer 14,5 s); âm thanh dài hơn được cắt ở khung tĩnh lặng nhất.
+* **VAD (Voice Activity Detector):** Sử dụng thuật toán năng lượng thích ứng theo mức tín hiệu thu âm (hoạt động tốt với cả micro độ nhạy thấp), có ngưỡng trễ (hysteresis) để giữ âm cuối yếu và gộp các ngắt ngắn trong câu; không dùng mô hình nơ-ron VAD riêng để tiết kiệm tài nguyên NPU.
 * **Nói chồng âm & Pha trộn ngôn ngữ:** Trường hợp nhiều người nói cùng lúc hoặc câu tiếng Việt chèn từ tiếng Anh đàm thoại chưa được hỗ trợ hoàn toàn (xem chi tiết tại [`docs/conversation.md`](docs/conversation.md)).
 * **Khả năng tương thích phần cứng:** Toàn bộ model được tối ưu hóa trực tiếp cho thiết bị **HSPTEK AIBOX 8550** (SoC Qualcomm QCS8550, kiến trúc NPU Hexagon v73, QAIRT 2.51). Không tương thích trực tiếp với các dòng chip cũ như QCS6490 / RB3 Gen 2 (Hexagon v68).

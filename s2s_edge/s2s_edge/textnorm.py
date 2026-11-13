@@ -196,14 +196,23 @@ def _punct_clause(c):
     return _cap_vi(s) + mark
 
 
-def vi_punct(text):
+def vi_punct(text, breaks=None):
     """Restore sentence capitalization, punctuation ('?', '!', '.') and clause splitting on Vietnamese ASR transcripts.
+    `breaks`: optional 1-indexed word boundary positions (e.g. from audio pauses >= 320 ms); inserts a sentence break where '.?!' is absent.
     Ensures interrogative and imperative contexts are preserved for accurate downstream NLLB MT translation."""
     t = re.sub(r"\s+", " ", text).strip()
     if not t: return t
 
     for pat, repl in _SPLIT_PATTERNS:
         t = pat.sub(repl, t)
+
+    if breaks:
+        words = t.split()
+        for k in sorted(set(breaks)):
+            if 0 < k < len(words) and words[k - 1][-1] not in ".?!":
+                w = words[k - 1].rstrip(",:;")
+                if w: words[k - 1] = w + "."
+        t = " ".join(words)
 
     raw_clauses = [c.strip() for c in re.split(r"(?<=[.?!])\s+", t) if c.strip()]
     out = [_punct_clause(c) for c in raw_clauses]

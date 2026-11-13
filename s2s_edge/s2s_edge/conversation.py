@@ -6,13 +6,14 @@ Language identification per utterance (cheap, no extra model):
  1. the Vietnamese CTC model always runs first (it is the cheapest ASR): high confidence and mostly valid Vietnamese words  =>  Vietnamese;
  2. otherwise, with one candidate left that language is used; with several (auto mode) SenseVoice runs in `auto` language mode and the script of its
     text decides (Hangul -> ko, Han -> zh, Latin -> en)."""
-import re
+import os, re, time
+from bisect import bisect_right
+from difflib import SequenceMatcher
 import numpy as np
-from .audio import SR, segment, normalize_level
+from .audio import SR, segment, normalize_level, SEG_MAX_S, vad_mode
 from .asr import AsrXx
 from .names import NameTransliterator
 from .textnorm import vi_punct
-import os, time
 
 # Punctuation/casing for the Vietnamese ASR text (Zipformer outputs lower case, no punctuation) before MT:
 #   S2S_VI_PUNCT=model : (default) vibert-capu int8 on the CPU (s2s_edge/punct_vi.py), falls back to the rule when assets/vi_capu is missing.
@@ -23,14 +24,40 @@ VI_PUNCT_MODE = os.environ.get("S2S_VI_PUNCT", "model").lower()
 VI_PUNCT = VI_PUNCT_MODE != "0"
 
 
-def restore_vi(text):
+def _align_breaks(src_words, dst_words, breaks):
+    """Map 1-indexed word boundary positions across tokenization/edit differences (e.g. ViCapu $MERGE_SPACE or glossary _asr_fix)."""
+    if not breaks: return []
+    if len(src_words) == len(dst_words): return list(breaks)
+    norm = lambda ws: [re.sub(r"\W+", "", w).lower() for w in ws]
+    sm = SequenceMatcher(None, norm(src_words), norm(dst_words)); mp = {}
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            for d in range(i2 - i1): mp[i1 + d + 1] = j1 + d + 1
+        elif i2 > i1 and j2 > j1:
+            mp[i2] = j2
+    return sorted({mp[k] for k in breaks if k in mp and 0 < mp[k] < len(dst_words)})
+
+
+def _break_positions(breaks, word_ends, frame_s=0.04):
+    """Map pause sample offsets (relative to segment start) to 1-indexed word boundary positions using Zipformer encoder frames."""
+    if not breaks or not word_ends: return []
+    n = len(word_ends); pos = set()
+    for s in breaks:
+        k = bisect_right(word_ends, s / (frame_s * SR))
+        if 0 < k < n: pos.add(k)
+    return sorted(pos)
+
+
+def restore_vi(text, breaks=None):
     if VI_PUNCT_MODE == "model":
         from .punct_vi import get
         from .registry import ASSETS
         m = get(ASSETS)
         if m is not None:
-            return vi_punct(m(text))
-    return vi_punct(text)
+            out = m(text)
+            if breaks: breaks = _align_breaks(text.split(), out.split(), breaks)
+            return vi_punct(out, breaks=breaks)
+    return vi_punct(text, breaks=breaks)
 
 HANGUL = re.compile(r"[가-힣ᄀ-ᇿ]"); HAN = re.compile(r"[一-鿿]"); LATIN = re.compile(r"[A-Za-z]")
 
@@ -75,15 +102,29 @@ class Engine:
 
     def gtime(self, graphs): return sum(g.total_s for g in graphs), sum(g.calls for g in graphs)
 
-    def translate_segment(self, wav, src, tgt, text=None, prepped=False):
-        """text: pre-computed ASR text (language identification already ran the ASR)."""
-        wav = wav if prepped else self.prep(wav); gr = self.graphs_for(src, tgt); g0, c0 = self.gtime(gr); t = {}; a = time.perf_counter()
-        if text is None: text = self.asr(src)(wav)
+    def _asr_stage(self, wav, src, text=None):
+        asr = self.asr(src)
+        if text is None: text = asr(wav)
+        raw_words = text.split(); we = getattr(asr, "last", {}).get("word_ends") if src == "vi" else None
+        word_ends = we if (we and len(we) == len(raw_words)) else None
         for pat, rep in (self.r.glossary.get("_asr_fix", {}).get(src, {}) or {}).items():      # domain fixes: how the ASR (mis)spells a term -> the term
             text = re.sub(pat, rep, text, flags=re.IGNORECASE)
+        return text, raw_words, word_ends
+
+    def _punct_stage(self, text, src, raw_words, word_ends, breaks):
+        if len(re.sub(r"[\W_]+", "", text)) < 2: return ""                                 # nothing intelligible (noise, breath, a lone "I.")
+        if src == "vi" and VI_PUNCT:
+            wb = _break_positions(breaks, word_ends)
+            if wb and text.split() != raw_words: wb = _align_breaks(raw_words, text.split(), wb)
+            text = restore_vi(text, breaks=wb)                                             # the CTC/RNN-T model outputs no punctuation: restore "?" so MT keeps questions
+        return text
+
+    def translate_segment(self, wav, src, tgt, text=None, prepped=False, breaks=None):
+        """text: pre-computed ASR text (language identification already ran the ASR)."""
+        wav = wav if prepped else self.prep(wav); gr = self.graphs_for(src, tgt); g0, c0 = self.gtime(gr); t = {}; a = time.perf_counter()
+        text, raw_words, word_ends = self._asr_stage(wav, src, text)
         b = time.perf_counter(); t["asr_s"] = b - a
-        if len(re.sub(r"[\W_]+", "", text)) < 2: text = ""                                 # nothing intelligible (noise, breath, a lone "I.")
-        if src == "vi" and text and VI_PUNCT: text = restore_vi(text)                                   # the CTC model outputs no punctuation: restore "?" so MT keeps questions
+        text = self._punct_stage(text, src, raw_words, word_ends, breaks)
         mt_text = self.mt(text, src, tgt) if text.strip() else ""
         if tgt in ("zh", "ko") and mt_text: mt_text = self.names(mt_text, tgt)
         c = time.perf_counter(); t["mt_s"] = c - b; tts = self.tts(tgt)
@@ -92,17 +133,15 @@ class Engine:
         t["audio_in_s"] = len(wav) / SR; t["audio_out_s"] = len(out) / sr
         return dict(src=src, tgt=tgt, asr=text, mt=mt_text, wav=out, sr=sr, timing=t)
 
-    def translate_segment_stream(self, wav, src, tgt, text=None, prepped=False):
+    def translate_segment_stream(self, wav, src, tgt, text=None, prepped=False, breaks=None):
         """Pipelined version for live output: ASR once, split the (punctuated) transcript into sentences, then MT + TTS sentence by sentence and
         yield each result as soon as its audio is ready, so playback of sentence 1 overlaps MT/TTS of sentence 2 (the NPU runs graphs one at a
         time, so this saves waiting time, not compute). Same fields as translate_segment, plus "part" = (index, count)."""
         wav = wav if prepped else self.prep(wav); gr = self.graphs_for(src, tgt); a = time.perf_counter()
-        if text is None: text = self.asr(src)(wav)
-        for pat, rep in (self.r.glossary.get("_asr_fix", {}).get(src, {}) or {}).items():
-            text = re.sub(pat, rep, text, flags=re.IGNORECASE)
+        text, raw_words, word_ends = self._asr_stage(wav, src, text)
         asr_s = time.perf_counter() - a
-        if len(re.sub(r"[\W_]+", "", text)) < 2: return
-        if src == "vi" and VI_PUNCT: text = restore_vi(text)
+        text = self._punct_stage(text, src, raw_words, word_ends, breaks)
+        if not text: return
         parts = split_sentences(text, src); tts = self.tts(tgt)
         for i, sent in enumerate(parts):
             g0, c0 = self.gtime(gr); b = time.perf_counter()
@@ -161,6 +200,12 @@ class Conversation:
         self.others = [l for l in (pair or ("vi", partner)) if l != "vi"] if not auto else ["en", "zh", "ko"]
         if not auto: self.partner = self.others[0]
 
+    def max_seg(self, max_seg_s=None):
+        """Every segment goes through the Vietnamese ASR first (LID), then maybe SenseVoice: cap by both windows. join_gap_s=0 in segment():
+        two speakers' turns 0.6-1 s apart must stay separate segments, each routed by its own language (the in-sentence join is for one speaker)."""
+        caps = [max_seg_s or SEG_MAX_S, getattr(self.e.asr("vi"), "max_s", SEG_MAX_S)] + [getattr(self.e.asr(l), "max_s", SEG_MAX_S) for l in self.others[:1]]
+        return min(caps)
+
     def route(self, wav):
         """-> (src, tgt, vi_text_or_None)"""
         asr_vi = self.e.asr("vi"); text = asr_vi(wav); st = dict(asr_vi.stats)
@@ -169,18 +214,25 @@ class Conversation:
         if self.auto and text and len(re.sub(r"[\W_]+", "", text)) >= 3: self.partner = src       # junk fragments must not change the partner language
         return src, "vi", text, st
 
-    def translate(self, wav, max_seg_s=12.0):
+    def _segments(self, wav, max_seg_s=None):
+        max_seg = self.max_seg(max_seg_s)
+        if vad_mode() == "hybrid":
+            segs, brks = segment(wav, max_s=max_seg, join_gap_s=0.0, return_breaks=True)
+            return list(zip(segs, brks))
+        return [(s, None) for s in segment(wav, max_s=max_seg, join_gap_s=0.0)]
+
+    def translate(self, wav, max_seg_s=None):
         out = []
-        for a, b in segment(wav, max_s=max_seg_s):
-            seg = self.e.prep(wav[a:b]); src, tgt, text, st = self.route(seg); r = self.e.translate_segment(seg, src, tgt, text=text, prepped=True)
+        for (a, b), brk in self._segments(wav, max_seg_s):
+            seg = self.e.prep(wav[a:b]); src, tgt, text, st = self.route(seg); r = self.e.translate_segment(seg, src, tgt, text=text, prepped=True, breaks=brk)
             r["span"] = (a / SR, b / SR); r["lid"] = st
             if r["mt"]: out.append(r)
         return out
 
-    def translate_stream(self, wav, max_seg_s=12.0):
+    def translate_stream(self, wav, max_seg_s=None):
         """Generator: one result per sentence as soon as its audio is ready (see Engine.translate_segment_stream)."""
-        for a, b in segment(wav, max_s=max_seg_s):
+        for (a, b), brk in self._segments(wav, max_seg_s):
             seg = self.e.prep(wav[a:b]); src, tgt, text, st = self.route(seg)
-            for r in self.e.translate_segment_stream(seg, src, tgt, text=text, prepped=True):
+            for r in self.e.translate_segment_stream(seg, src, tgt, text=text, prepped=True, breaks=brk):
                 r["span"] = (a / SR, b / SR); r["lid"] = st
                 if r["mt"]: yield r
