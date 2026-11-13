@@ -7,6 +7,7 @@ so every chunk fits the static graph, and chunks are joined with a short pause.
 import os, re, unicodedata, numpy as np
 from .textnorm import normalize
 from .names import VietnameseNames, latin_to_vi
+from . import tts_format
 
 def split_outputs(out):
     """(audio, length, others) from a TTS graph's outputs, independent of their order: the AI Hub inference check on QCS8550 showed the
@@ -84,14 +85,27 @@ class TtsVi:
             self.vn = VietnameseNames(os.path.join(assets_dir, "cmudict_min.json"), known)
 
     def _synth(self, piece):
-        b = unicodedata.normalize("NFC", piece).encode("utf-8")[:512]; x = np.zeros((1, 512), np.int32); x[0, :len(b)] = list(b)
+        b = unicodedata.normalize("NFC", piece).encode("utf-8")
+        if len(b) > 512 and tts_format.mode() != 'legacy': raise ValueError('Piper input exceeds 512 UTF-8 bytes')
+        b = b[:512]; x = np.zeros((1, 512), np.int32); x[0, :len(b)] = list(b)
         audio, yl, rest = split_outputs(self.g(text_bytes=x)); yl = int(round(yl)); self.oov += int(rest[0].reshape(-1)[0]) if rest else 0
         return audio[: max(yl, 1) * 256].astype(np.float32), yl >= 1533
 
     def synthesize(self, text):
+        if tts_format.mode() == 'legacy':
+            if self.vn is not None: text = latin_to_vi(text, self.vn, self.glossary)
+            text = normalize(text.lower(), 'vi')
+            self.normalized_text = text; self.tts_input_text = text
+            return _join(adaptive(text, self.max_units, 'word', self._synth), self.sr)
+        text, self.format_trace = tts_format.prepare(text, 'vi')
+        self.normalized_text = text
         if self.vn is not None: text = latin_to_vi(text, self.vn, self.glossary)     # words outside Piper's table would be silently dropped
-        text = normalize(text.lower(), "vi")
-        return _join(adaptive(text, self.max_units, "word", self._synth), self.sr)
+        text = text.lower()
+        self.tts_input_text = text
+        def counter(s):
+            byte_count = len(unicodedata.normalize('NFC', s).encode('utf-8'))
+            return max(len(s.split()), (byte_count*self.max_units+511)//512)
+        return _join(tts_format.adaptive(text, 'vi', self.max_units, 'word', self._synth, self.format_trace, counter=counter), self.sr)
 
 
 class TtsZh:
@@ -109,7 +123,12 @@ class TtsZh:
         return audio[: max(yl, 1) * 512].astype(np.float32), yl >= 381
 
     def synthesize(self, text):
-        return _join(adaptive(normalize(text, "zh"), self.max_units, "char", self._synth), self.sr)
+        if tts_format.mode() == 'legacy':
+            self.tts_input_text = normalize(text, 'zh')
+            return _join(adaptive(self.tts_input_text, self.max_units, 'char', self._synth), self.sr)
+        text, self.format_trace = tts_format.prepare(text, 'zh')
+        self.normalized_text = text; self.tts_input_text = text
+        return _join(tts_format.adaptive(text, 'zh', self.max_units, 'char', self._synth, self.format_trace), self.sr)
 
 
 class TtsEnKo:
@@ -126,12 +145,23 @@ class TtsEnKo:
         return "".join(c for c in s if ord(c) < len(self.ok) and self.ok[ord(c)])
 
     def _synth(self, piece):
-        s = self._clean(self.p._preprocess_text(piece, self.lang))[: self.N]
+        s = self._clean(self.p._preprocess_text(piece, self.lang))
+        if len(s) > self.N and tts_format.mode() != 'legacy': raise ValueError('Supertonic preprocessed input exceeds graph budget')
+        s = s[:self.N]
         if not s.strip(): return np.zeros(0, np.float32), False
         cp = np.zeros((1, self.N), np.int32); cp[0, :len(s)] = [ord(c) for c in s]
         wav, lat, _ = split_outputs(self.g(cp=cp, style_dp=self.dp, style_ttl=self.ttl)); lat = int(round(lat))
         return wav[: max(lat, 1) * 3072].astype(np.float32), lat >= len(wav) // 3072 - 2
 
     def synthesize(self, text):
-        text = normalize(text, self.lang); units = self.N - 14 if self.lang == "en" else 52            # Korean is spoken slowly: ~52 characters fill the 10 s window
-        return _join([w for w in adaptive(text, units, "char", self._synth) if len(w)], self.sr)
+        text, self.format_trace = tts_format.prepare(text, self.lang)
+        self.normalized_text = text; self.tts_input_text = text
+        units = self.N - 14 if self.lang == "en" else 52            # Korean is spoken slowly: ~52 characters fill the 10 s window
+        if tts_format.mode() == 'legacy':
+            return _join([w for w in adaptive(text, units, 'char', self._synth) if len(w)], self.sr)
+        # Hangul expands to Jamo under NFKD; budget the actual graph input,
+        # including language markers and preprocessing expansions.
+        counter = lambda s: len(self._clean(self.p._preprocess_text(s, self.lang)))
+        result = tts_format.adaptive(text, self.lang, self.N, 'char', self._synth, self.format_trace, counter=counter)
+        self.format_trace['preprocessed_chunk_lengths'] = [counter(p) for p in self.format_trace.get('planned_chunks', [])]
+        return _join([w for w in result if len(w)], self.sr)

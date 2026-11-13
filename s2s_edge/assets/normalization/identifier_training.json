@@ -1,0 +1,13 @@
+{
+  "source": "tests/fixtures/identifier_train.json",
+  "source_sha256": "fb5e2f7e2efdad924c5e47e4b809a7fc0af83f144eeed9b472ce9f388a8360e0",
+  "sentences": 15304,
+  "augmentation_seed": 73129,
+  "augmentation": "identifier lengths/grouping/alphabetic prefixes plus measurement negatives",
+  "test_cases_used_for_training": false,
+  "labels": "BIO for identifiers vs other spans",
+  "tokenization": "whitespace only; no time/phone/money patterns",
+  "model_sha256": "2f4ae5353880f8ad546b0c03d228fe75af301f92fcb423360eaf672754001552",
+  "python_crfsuite_version": "0.9.12",
+  "data_origin": "Synthetic templates with generated values, original base seed 521; no organiser recordings or transcripts"
+}

@@ -9,3 +9,6 @@ psutil
 sounddevice
 jiwer
 sacrebleu
+
+# Small learned identifier tagger used by hybrid TTS format
+python-crfsuite==0.9.12

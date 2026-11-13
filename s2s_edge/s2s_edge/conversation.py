@@ -89,7 +89,7 @@ class Engine:
         out, sr = tts.synthesize(mt_text) if mt_text.strip() else (np.zeros(0, np.float32), tts.sr); d = time.perf_counter(); t["tts_s"] = d - c
         g1, c1 = self.gtime(gr); t["total_s"] = d - a; t["graph_s"] = g1 - g0; t["graph_calls"] = c1 - c0; t["host_s"] = t["total_s"] - t["graph_s"]
         t["audio_in_s"] = len(wav) / SR; t["audio_out_s"] = len(out) / sr
-        return dict(src=src, tgt=tgt, asr=text, mt=mt_text, wav=out, sr=sr, timing=t)
+        return dict(src=src, tgt=tgt, asr=text, mt=mt_text, tts_text=getattr(tts, "tts_input_text", mt_text) if mt_text.strip() else "", tts_format=getattr(tts, "format_trace", {}) if mt_text.strip() else {}, wav=out, sr=sr, timing=t)
 
     def translate_segment_stream(self, wav, src, tgt, text=None, prepped=False):
         """Pipelined version for live output: ASR once, split the (punctuated) transcript into sentences, then MT + TTS sentence by sentence and
@@ -110,7 +110,7 @@ class Engine:
             c = time.perf_counter(); out, sr = tts.synthesize(mt_text) if mt_text.strip() else (np.zeros(0, np.float32), tts.sr); d = time.perf_counter()
             g1, c1 = self.gtime(gr); t = dict(asr_s=asr_s if i == 0 else 0.0, mt_s=c - b, tts_s=d - c, total_s=(d - a) if i == 0 else (d - b), graph_s=g1 - g0, graph_calls=c1 - c0)
             t["host_s"] = t["total_s"] - t["graph_s"]; t["audio_in_s"] = len(wav) / SR if i == 0 else 0.0; t["audio_out_s"] = len(out) / sr
-            yield dict(src=src, tgt=tgt, asr=sent, mt=mt_text, wav=out, sr=sr, timing=t, part=(i, len(parts)))
+            yield dict(src=src, tgt=tgt, asr=sent, mt=mt_text, tts_text=getattr(tts, 'tts_input_text', mt_text) if mt_text.strip() else '', tts_format=getattr(tts, 'format_trace', {}) if mt_text.strip() else {}, wav=out, sr=sr, timing=t, part=(i, len(parts)))
 
 
 _SENT = re.compile(r"(?<=[\.\!\?。！？])\s+|(?<=[。！？])")
