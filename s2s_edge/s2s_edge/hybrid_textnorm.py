@@ -4,6 +4,8 @@ An optional existing CRF proposes identifier spans; it cannot generate text.
 All rendering is deterministic from immutable numeric fields. Unknown/ambiguous
 input is retained or spelled conservatively and reported, rather than guessed.
 """
+from __future__ import annotations
+
 from dataclasses import asdict, dataclass
 from datetime import date
 from decimal import Decimal
@@ -18,8 +20,56 @@ from .format_locales import (CURRENCY, CURRENCY_ALIASES, DIGITS, IDENTIFIER_CUES
 from .textnorm import _vi3, _zh4, en_num
 
 LANGS = ('vi', 'en', 'ko', 'zh')
-NUM = r'[+\-−]?\d+(?:[.,，．]\d+)*'
+NUM = r'[+\-−]?\d+(?:[.,．]\d+)*'
 _CRF = None
+_CALL_ONLY_CUES = {'gọi', 'call'}
+_EXCLUDED_URL_TRAIL = '.,!?;:)\'"]}。，！？；：、'
+_URL_RX = re.compile(r'(?:https?://|www\.)[^\s<>"\']+', re.IGNORECASE)
+_EMAIL_RX = re.compile(r'(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?![A-Za-z0-9._%+-])')
+_VERSION_PREFIX_RX = re.compile(r'(?<![A-Za-z0-9])[vV]\d+(?:\.\d+){1,3}(?:-[A-Za-z0-9._-]+)?(?![A-Za-z0-9.])')
+_VERSION_CUE_RX = re.compile(
+    r'(?:(?<![A-Za-z])(?:version|ver\.?|release)|phiên bản|버전|版本)\s*(\d+(?:\.\d+){1,3}(?:-[A-Za-z0-9._-]+)?)(?![A-Za-z0-9.])',
+    re.IGNORECASE,
+)
+_SENT_SPLIT_RX = re.compile(r'[.!?。！？;；\n]')
+_LIST_SEP_RX = re.compile(r'(?:\s*[,，、]\s*(?:(?:and|or|và|hoặc|또는|및|和|或)\s+)?|\s+(?:and|or|và|hoặc|또는|및|和|或)\s+)$', re.IGNORECASE)
+_LIST_ITEM_RX = re.compile(
+    r'(?:\+?\s*(?:\d+\s*)?(?:\(\d{1,5}\)\s*)?\d[\d\s()\-]*\d|[A-Z]{2,4}\s+\d+(?:-\d+)*|[A-Za-z0-9][A-Za-z0-9\-]*\d[A-Za-z0-9\-]*|\d{3,})$'
+)
+_SPACED_PREFIX_RX = re.compile(r'(?<![A-Za-z\d])[A-Z]{2,4}\s+\d+(?:-\d+)*(?![A-Za-z\d])')
+_ALNUM_CODE_RX = re.compile(r'(?<![A-Za-z\d])(?:[A-Za-z]+[A-Za-z\d\-]*\d[A-Za-z\d\-]*|\d+[A-Za-z][A-Za-z\d\-]*)(?![A-Za-z\d])')
+_PHONE_OR_NUM_ID_RX = re.compile(
+    r'(?<![A-Za-z\d])(?:\+\s*)?(?:\(\d[\d\s\-]*\)\s*[\d\s()\-]*\d|\(\d[\d\s\-]+\d|\d[\d\s()\-]*\d|\d+)(?![A-Za-z\d])'
+)
+_SCI_EXACT_RX = re.compile(r'[+\-−]?\d+(?:[.,．]\d+)?[eE][+\-−]?\d+')
+_AMPM_GROUP = (
+    r'(?:'
+    r'[aApP]\.[mM]\.(?=[,;:\)!?\]\}\'"’”°。！？，、；：]|\.(?:\s|$)|\s+(?-i:[a-zàáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ]))'
+    r'|[aApP]\.?[mM]'
+    r')'
+)
+_CUE_WORDS = frozenset(c.casefold() for c in IDENTIFIER_CUES)
+_SEPARATOR_POLICY = (
+    'locale decimal (. for en/ko/zh, , for vi); '
+    'CJK fullwidth comma (，) is a clause boundary; '
+    'ambiguous repeated or malformed separators spell characters with warning'
+)
+_CURRENCY_ALT = '|'.join(re.escape(s) for s in sorted(CURRENCY_ALIASES, key=len, reverse=True))
+_UNITS_ALT = '|'.join(re.escape(s) for s in sorted(UNITS, key=len, reverse=True))
+_TYPED_PATTERNS = (
+    ('date', r'(?<!\d)(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}(?!\d)|\d{4}年\s*\d{1,2}月\s*\d{1,2}日|\d{4}년\s*\d{1,2}월\s*\d{1,2}일|\d{1,2}/\d{1,2}(?:/\d{2,4})?(?!\d)|\d{1,2}\s+tháng\s+\d{1,2}(?:\s+năm\s+\d{4})?)'),
+    ('date', r'\b(?:' + '|'.join(MONTHS_EN) + r')\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?\b'),
+    ('year', r'(?<!\d)\d{4}\s*(?:年|년)'),
+    ('time', r'(?<![\d:：])(?P<hour>\d{1,2})\s*[:：hH]\s*(?P<minute>\d{2})(?:[:：](?P<second>\d{2}))?(?:\s*(?P<ampm>' + _AMPM_GROUP + r')(?![A-Za-z\u00C0-\u024F\u1E00-\u1EFF\d]))?(?!\d)'),
+    ('money', r'(?P<currency>' + _CURRENCY_ALT + r')\s*(?P<number>' + NUM + r')(?!\d)'),
+    ('money', r'(?P<number>' + NUM + r')\s*(?P<currency>' + _CURRENCY_ALT + r')(?![A-Za-z\u00C0-\u024F\u1E00-\u1EFF])'),
+    ('percent', r'(?P<number>' + NUM + r')\s*[%％]'),
+    ('measure', r'(?P<number>' + NUM + r')\s*(?P<unit>' + _UNITS_ALT + r')(?![A-Za-z\u00C0-\u024F\u1E00-\u1EFF])'),
+    ('unsupported', r'(?<![A-Za-z0-9_.\-/])[+\-−]?\d+(?:[.,．]\d+)?[eE][+\-−]?\d+(?![A-Za-z0-9_\-/]|\.\d)'),
+    ('unsupported', r'(?<![A-Za-z0-9_.\-/])\d+(?:[.,．]\d+)?(?:\s*[-–]\s*\d+(?:[.,．]\d+)?)+(?![A-Za-z0-9_\-/]|\.\d)'),
+)
+_TYPED_COMPILED = [(kind, re.compile(pat, flags=re.IGNORECASE)) for kind, pat in _TYPED_PATTERNS]
+_PRIORITY = {'date': 0, 'year': 1, 'time': 1, 'money': 2, 'percent': 2, 'measure': 2, 'identifier': 3, 'unsupported': 4, 'number': 5}
 
 
 def join(lang, words):
@@ -111,12 +161,10 @@ def numeric_fields(raw, lang):
     elif '.' in s or ',' in s:
         sep = '.' if '.' in s else ','
         groups = s.split(sep)
-        if sep != decimal and all(len(g) == 3 for g in groups[1:]) and len(groups[0]) <= 3:
+        if sep != decimal and all(len(g) == 3 for g in groups[1:]) and 1 <= len(groups[0]) <= 3:
             whole, frac = ''.join(groups), ''
         elif len(groups) == 2:
             whole, frac = groups
-        elif sep != decimal and all(len(g) == 3 for g in groups[1:]):
-            whole, frac = ''.join(groups), ''
         else:
             raise ValueError('ambiguous or invalid repeated decimal separator')
     else:
@@ -155,6 +203,246 @@ class Span:
     source: str = 'grammar'
 
 
+def _overlaps_any(a: int, b: int, ranges: list[tuple[int, int]]) -> bool:
+    return any(a < rb and b > ra for ra, rb in ranges)
+
+
+def _excluded_regions(text: str) -> list[tuple[int, int]]:
+    regions: list[tuple[int, int]] = []
+    for m in _URL_RX.finditer(text):
+        a, b = m.start(), m.end()
+        while b > a and text[b - 1] in _EXCLUDED_URL_TRAIL:
+            b -= 1
+        if b > a:
+            regions.append((a, b))
+    for m in _EMAIL_RX.finditer(text):
+        regions.append((m.start(), m.end()))
+    for m in _VERSION_PREFIX_RX.finditer(text):
+        regions.append((m.start(), m.end()))
+    for m in _VERSION_CUE_RX.finditer(text):
+        regions.append((m.start(1), m.end(1)))
+    regions.sort()
+    return regions
+
+
+def _match_cue(clause_prefix: str) -> str | None:
+    tail = clause_prefix.casefold()[-64:]
+    for cue in IDENTIFIER_CUES:
+        cjk = any('\u3400' <= c <= '\u9fff' or '\uac00' <= c <= '\ud7af' for c in cue)
+        pattern = re.escape(cue) if cjk else r'(?<!\w)' + re.escape(cue) + r'(?!\w)'
+        m = re.search(pattern + r'([^\d,，;；.!?。！？\n]{0,24})$', tail)
+        if not m:
+            continue
+        connector = m.group(1)
+        if cue == 'gọi' and re.match(r'^\s+là(?:\s|$)', connector):
+            continue
+        return cue
+    return None
+
+
+def _has_cue_or_list_context(text: str, start: int) -> tuple[bool, str, str | None]:
+    clause = _SENT_SPLIT_RX.split(text[:start])[-1]
+    direct = _match_cue(clause)
+    if direct is not None:
+        return True, 'context', direct
+    cur = clause
+    for _ in range(4):
+        sep_m = _LIST_SEP_RX.search(cur)
+        if not sep_m:
+            break
+        before_sep = cur[:sep_m.start()].rstrip()
+        item_m = _LIST_ITEM_RX.search(before_sep)
+        if not item_m:
+            break
+        cur = before_sep[:item_m.start()]
+        cue = _match_cue(cur)
+        if cue is not None:
+            return True, 'context_list', cue
+    return False, '', None
+
+
+def _parens_balanced(s: str) -> bool:
+    depth = 0
+    for ch in s:
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
+def _check_paren_and_hyphen(text: str, a: int, b: int) -> tuple[int, int, str | None]:
+    raw = text[a:b]
+    if raw.startswith('(') and raw.count('(') == 1 and raw.count(')') == 0 and b < len(text) and text[b] == ')':
+        a += 1
+        raw = text[a:b]
+    if '--' in raw:
+        return a, b, 'ambiguous_malformed_hyphen'
+    if b < len(text) and text[b] == '-' and (b + 1 >= len(text) or not text[b + 1].isalnum()):
+        return a, b + 1, 'ambiguous_malformed_hyphen'
+    if not _parens_balanced(raw):
+        return a, b, 'ambiguous_unbalanced_parens'
+    return a, b, None
+
+
+def _is_phone_structure(raw: str, digit_count: int, groups: list[str]) -> bool:
+    if digit_count < 7 or digit_count > 15:
+        return False
+    if raw.startswith('+') and (len(groups) >= 2 or '(' in raw):
+        return True
+    if re.search(r'\(\d{2,4}\)', raw) and len(groups) >= 2:
+        return True
+    if '-' in raw and ' ' not in raw and '(' not in raw and len(groups) >= 3 and digit_count >= 9:
+        if all(2 <= len(g) <= 5 for g in groups):
+            return True
+    return False
+
+
+def _typed_candidates(text: str, excluded: list[tuple[int, int]]) -> list[tuple[int, int, str, re.Match, str]]:
+    out: list[tuple[int, int, str, re.Match, str]] = []
+    for kind, rx in _TYPED_COMPILED:
+        for m in rx.finditer(text):
+            a, b = m.start(), m.end()
+            if _overlaps_any(a, b, excluded):
+                continue
+            raw = text[a:b]
+            if kind in ('money', 'percent', 'measure', 'unsupported') and raw.startswith(('-', '−', '+')) and a > 0 and text[a - 1].isdecimal():
+                continue
+            out.append((a, b, kind, m, 'grammar'))
+    return out
+
+
+def _higher_priority_blocked(typed_cands: list[tuple[int, int, str, re.Match, str]], excluded: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    blocked = list(excluded)
+    selected_hi: list[tuple[int, int]] = []
+    for a, b, kind, _, _ in sorted(typed_cands, key=lambda c: (_PRIORITY[c[2]], c[0], -(c[1] - c[0]))):
+        if _PRIORITY[kind] >= _PRIORITY['identifier']:
+            continue
+        if _overlaps_any(a, b, selected_hi):
+            continue
+        selected_hi.append((a, b))
+        blocked.append((a, b))
+    return blocked
+
+
+def _collect_identifier_candidates(text: str, blocked: list[tuple[int, int]]) -> list[tuple[int, int, str, str]]:
+    cands: list[tuple[int, int, str, str]] = []
+    # 1. Spaced uppercase prefix codes with cue (e.g., "Flight VN 123", "Chuyến bay của tôi là VN 123").
+    for m in _SPACED_PREFIX_RX.finditer(text):
+        a, b = m.start(), m.end()
+        if _overlaps_any(a, b, blocked):
+            continue
+        if m.group().split()[0].casefold() in _CUE_WORDS:
+            continue
+        has_ctx, ctx_reason, _ = _has_cue_or_list_context(text, a)
+        if has_ctx:
+            reason = 'spaced_prefix_code' if ctx_reason == 'context' else 'context_list'
+            cands.append((a, b, 'identifier', reason))
+
+    # 2. Alphanumeric codes (e.g., "AB-012", "VN247", "X9Q7").
+    for m in _ALNUM_CODE_RX.finditer(text):
+        a, b = m.start(), m.end()
+        raw = m.group().rstrip('-')
+        b = a + len(raw)
+        if b <= a or _overlaps_any(a, b, blocked):
+            continue
+        if _SCI_EXACT_RX.fullmatch(raw):
+            continue
+        letters = re.findall(r'[A-Za-z]', raw)
+        digits_in = re.findall(r'\d', raw)
+        if not (letters and digits_in):
+            continue
+        a, b, err = _check_paren_and_hyphen(text, a, b)
+        if not err and a > 0 and text[a - 1] == '(' and (b >= len(text) or text[b] != ')'):
+            if ')' not in text[b:b + 12]:
+                a -= 1
+                err = 'ambiguous_unbalanced_parens'
+        if err:
+            cands.append((a, b, 'ambiguous_identifier', err))
+            continue
+        has_ctx, ctx_reason, _ = _has_cue_or_list_context(text, a)
+        if has_ctx or len(letters) >= 2:
+            cands.append((a, b, 'identifier', ctx_reason if has_ctx else 'alphanumeric grammar'))
+
+    # 3. Phone and numeric identifier sequences.
+    for m in _PHONE_OR_NUM_ID_RX.finditer(text):
+        a, b = m.start(), m.end()
+        if _overlaps_any(a, b, blocked):
+            continue
+        raw = text[a:b].rstrip(' -')
+        b = a + len(raw)
+        if b <= a:
+            continue
+        if ' -' in raw or '- ' in raw:
+            continue
+        a, b, err = _check_paren_and_hyphen(text, a, b)
+        raw = text[a:b]
+        groups = re.findall(r'\d+', raw)
+        digit_count = sum(c.isdecimal() for c in raw)
+        has_ctx, ctx_reason, cue = _has_cue_or_list_context(text, a)
+        phone_shape = _is_phone_structure(raw, digit_count, groups)
+        if err:
+            if has_ctx or phone_shape or raw.startswith(('+', '(')) or digit_count >= 7 or '--' in raw:
+                cands.append((a, b, 'ambiguous_identifier', err))
+            continue
+        if phone_shape:
+            cands.append((a, b, 'identifier', ctx_reason if has_ctx else 'phone_grammar'))
+            continue
+        if has_ctx:
+            if cue in _CALL_ONLY_CUES and digit_count < 3 and '+' not in raw and '(' not in raw:
+                continue
+            is_range_shape = (
+                '-' in raw and ' ' not in raw and not raw.startswith('+') and '(' not in raw
+                and len(groups) == 2 and digit_count < 6 and not any(g.startswith('0') for g in groups)
+            )
+            if is_range_shape and cue in ('phone', 'telephone', 'mobile', 'hotline', 'tel', 'fax',
+                                         'phone number', 'telephone number', 'số điện thoại', 'điện thoại',
+                                         'di động', 'gọi số', 'gọi', '전화번호', '전화', '휴대폰', '연락처',
+                                         '电话号码', '电话', '手机号', '手机', '热线', '座机', '拨打', '致电'):
+                continue
+            cands.append((a, b, 'identifier', ctx_reason))
+    return cands
+
+
+def identifier_candidates(text: str, lang: str = 'en') -> list[dict]:
+    """Return structured identifier candidates {start, end, raw, reason} using shared lexical boundaries."""
+    if lang not in LANGS:
+        raise ValueError('unsupported language')
+    excluded = _excluded_regions(text)
+    typed_cands = _typed_candidates(text, excluded)
+    blocked = _higher_priority_blocked(typed_cands, excluded)
+    raw_cands = _collect_identifier_candidates(text, blocked)
+    selected: list[tuple[int, int, str]] = []
+    for a, b, _, reason in sorted(raw_cands, key=lambda c: (c[0], -(c[1] - c[0]))):
+        if _overlaps_any(a, b, [(s[0], s[1]) for s in selected]):
+            continue
+        selected.append((a, b, reason))
+    selected.sort(key=lambda s: s[0])
+    return [{'start': a, 'end': b, 'raw': text[a:b], 'reason': reason} for a, b, reason in selected]
+
+
+def extract_spans(text: str, lang: str, *, date_order: str | None = None, learned_identifiers: bool = False) -> list[dict]:
+    """Pure-Python typed span extraction sharing formatter lexical and separator policies."""
+    norm = HybridNormalizer(date_order=date_order, learned_identifiers=learned_identifiers)
+    _, record = norm(text, lang)
+    out: list[dict] = []
+    for sp in record['spans']:
+        val = sp['value']
+        reason = val.get('reason') or val.get('warning') if isinstance(val, dict) else None
+        out.append({
+            'start': sp['start'],
+            'end': sp['end'],
+            'kind': sp['kind'],
+            'raw': sp['raw'],
+            'value': val,
+            'source': sp['source'],
+            'reason': reason,
+        })
+    return out
+
+
 class HybridNormalizer:
     def __init__(self, date_order=None, learned_identifiers=True):
         self.date_order = date_order
@@ -164,39 +452,39 @@ class HybridNormalizer:
 
     @staticmethod
     def _context_identifier(text, start):
-        prefix = re.split(r'[.!?。！？;；\n]', text[:start])[-1].casefold()[-64:]
-        # Limit proximity; a cue in an earlier clause must not turn amounts into IDs.
-        for cue in IDENTIFIER_CUES:
-            cjk = any('\u3400' <= c <= '\u9fff' or '\uac00' <= c <= '\ud7af' for c in cue)
-            pattern = re.escape(cue) if cjk else r'(?<!\w)' + re.escape(cue) + r'(?!\w)'
-            if re.search(pattern + r'[^\d,，;；]{0,16}$', prefix): return True
-        return False
+        has_ctx, _, _ = _has_cue_or_list_context(text, start)
+        return has_ctx
 
-    def _learned_spans(self, text, lang):
+    def _learned_spans(self, text, lang, excluded=None):
         global _CRF
         if not self.learned_identifiers or lang not in ('en', 'vi'):
             return []
         try:
             if _CRF is None:
-                from pathlib import Path
-                from .identifier_tagger import IdentifierTagger
-                _CRF = IdentifierTagger(Path(__file__).resolve().parents[2] / 'models/normalization/identifier.crfsuite')
+                from .identifier_tagger import IdentifierTagger, find_crf_model
+                _CRF = IdentifierTagger(find_crf_model())
             self.identifier_model_status = 'CRF loaded'
             found = []; cursor = 0
             for raw in _CRF(text, lang):
                 a = text.find(raw, cursor)
                 if a < 0: continue
                 cursor = a+len(raw)
+                if excluded and _overlaps_any(a, cursor, excluded):
+                    continue
                 if re.fullmatch(r'[A-Za-z\d+() -]+', raw) and any(c.isdecimal() for c in raw):
-                    found.append((a, cursor))
+                    if _parens_balanced(raw) and '--' not in raw and not re.fullmatch(r'\d+\s*-\s*\d+', raw):
+                        found.append((a, cursor))
             return found
-        except (ImportError, OSError):
+        except (ImportError, OSError, RuntimeError, ValueError):
             self.identifier_model_status = 'unavailable; context grammars only'
             return []
 
     def render(self, kind, raw, m, lang):
         if kind == 'unsupported':
             raise ValueError('unsupported numeric notation; do not infer its semantic value')
+        if kind == 'ambiguous_identifier':
+            reason = m if isinstance(m, str) else 'ambiguous identifier boundary'
+            raise ValueError(reason)
         if kind == 'date':
             nums = re.findall(r'\d+', raw)
             order = self.date_order or os.environ.get('S2S_DATE_ORDER', '')
@@ -280,38 +568,25 @@ class HybridNormalizer:
     def __call__(self, text, lang):
         if lang not in LANGS: raise ValueError('unsupported language')
         start_time = time.perf_counter()
-        # Keep offsets relative to the supplied string. Unicode Nd digits are parsed by int().
-        currency = '|'.join(re.escape(s) for s in sorted(CURRENCY_ALIASES, key=len, reverse=True))
-        units = '|'.join(re.escape(s) for s in sorted(UNITS, key=len, reverse=True))
-        patterns = [
-            ('date', r'(?<!\d)(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}(?!\d)|\d{4}年\s*\d{1,2}月\s*\d{1,2}日|\d{4}년\s*\d{1,2}월\s*\d{1,2}일|\d{1,2}/\d{1,2}(?:/\d{2,4})?(?!\d)|\d{1,2}\s+tháng\s+\d{1,2}(?:\s+năm\s+\d{4})?)'),
-            ('date', r'\b(?:'+'|'.join(MONTHS_EN)+r')\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?\b'),
-            ('year', r'(?<!\d)\d{4}\s*(?:年|년)'),
-            ('time', r'(?<![\d:：])(?P<hour>\d{1,2})\s*[:：hH]\s*(?P<minute>\d{2})(?:[:：](?P<second>\d{2}))?(?:\s*(?P<ampm>[aApP]\.?[mM]\.?))?(?!\d)'),
-            ('money', r'(?P<currency>'+currency+r')\s*(?P<number>'+NUM+r')(?!\d)'),
-            ('money', r'(?P<number>'+NUM+r')\s*(?P<currency>'+currency+r')(?![A-Za-z])'),
-            ('percent', r'(?P<number>'+NUM+r')\s*[%％]'),
-            ('measure', r'(?P<number>'+NUM+r')\s*(?P<unit>'+units+r')(?![A-Za-z])'),
-            ('unsupported', r'(?<![\w-])\d+(?:[.,]\d+)?[eE][+\-]?\d+(?!\w)'),
-            ('unsupported', r'(?<![\w-])\d+(?:[.,]\d+)?\s*[-–]\s*\d+(?:[.,]\d+)?(?![\w-])'),
-        ]
-        candidates = []
-        for kind, pattern in patterns:
-            for m in re.finditer(pattern, text, flags=re.IGNORECASE):
-                candidates.append((m.start(), m.end(), kind, m, 'grammar'))
-        # An identifier is a whole code/sequence, not a substring of a number.
-        for m in re.finditer(r'(?<![A-Za-z\d])(?:\+?\d[\d ()-]*\d|[A-Za-z]+[A-Za-z\d-]*\d[A-Za-z\d-]*|\d+[A-Za-z][A-Za-z\d]*)(?![A-Za-z\d])', text):
-            raw = m.group().rstrip(' -')
-            context = self._context_identifier(text, m.start())
-            mixed = bool(re.search('[A-Za-z]', raw)) and bool(re.search(r'\d', raw))
-            # Single letter suffixes can be units; grammar candidates take priority.
-            if context or (mixed and len(re.findall('[A-Za-z]', raw)) >= 2):
-                candidates.append((m.start(), m.start()+len(raw), 'identifier', m, 'context' if context else 'alphanumeric grammar'))
-        for a, b in self._learned_spans(text, lang):
+        excluded = _excluded_regions(text)
+        candidates = _typed_candidates(text, excluded)
+        blocked = _higher_priority_blocked(candidates, excluded)
+        for a, b, kind, reason in _collect_identifier_candidates(text, blocked):
+            candidates.append((a, b, kind, reason if kind == 'ambiguous_identifier' else None, reason))
+        for a, b in self._learned_spans(text, lang, excluded):
             candidates.append((a, b, 'identifier', None, 'CRF proposal'))
         for m in re.finditer(NUM, text):
-            candidates.append((m.start(), m.end(), 'number', m, 'grammar'))
-        priority = {'date': 0, 'year': 1, 'time': 1, 'money': 2, 'percent': 2, 'measure': 2, 'identifier': 3, 'unsupported': 4, 'number': 5}
+            a, b = m.start(), m.end()
+            if _overlaps_any(a, b, excluded):
+                continue
+            if a > 0 and text[a - 1].isascii() and text[a - 1].isalpha():
+                continue
+            if b < len(text) and text[b].isascii() and text[b].isalpha():
+                continue
+            if text[a:b].startswith(('-', '−', '+')) and a > 0 and text[a - 1].isdecimal():
+                continue
+            candidates.append((a, b, 'number', m, 'grammar'))
+        priority = dict(_PRIORITY, ambiguous_identifier=_PRIORITY['identifier'])
         selected = []
         for a, b, kind, match, source in sorted(candidates, key=lambda c: (priority[c[2]], c[0], -(c[1]-c[0]))):
             if any(a < s.end and b > s.start for s in selected): continue
@@ -345,6 +620,7 @@ class HybridNormalizer:
                   'spans': [asdict(s) for s in selected], 'protected_ranges': spoken_ranges,
                   'warnings': warnings, 'seconds': time.perf_counter()-start_time,
                   'identifier_model': self.identifier_model_status,
+                  'separator_policy': _SEPARATOR_POLICY,
                   'validation': 'raw span identity; typed deterministic renderer; no generative numeric rewriting'}
         self.records.append(record)
         if len(self.records) > 128: del self.records[:-128]

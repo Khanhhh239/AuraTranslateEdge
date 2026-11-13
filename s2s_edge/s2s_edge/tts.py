@@ -81,10 +81,11 @@ class TtsVi:
     sr = 22050; unit, max_units = "word", 26
 
     def __init__(self, graph, assets_dir=None, glossary=None, tts_format=None):
-        self.g = graph; self.oov = 0; self.glossary = glossary; self.vn = None
+        self.g = graph; self.oov = 0; self.last_oov_delta = 0; self.glossary = glossary; self.vn = None
         self.tts_format = _tts_format.resolve_mode(tts_format)
         if assets_dir and os.path.exists(os.path.join(assets_dir, "piper_vi_words.txt")):
-            known = set(open(os.path.join(assets_dir, "piper_vi_words.txt"), encoding="utf-8").read().splitlines())
+            with open(os.path.join(assets_dir, "piper_vi_words.txt"), encoding="utf-8") as f:
+                known = set(f.read().splitlines())
             self.vn = VietnameseNames(os.path.join(assets_dir, "cmudict_min.json"), known)
 
     def _synth(self, piece):
@@ -94,23 +95,82 @@ class TtsVi:
         audio, yl, rest = split_outputs(self.g(text_bytes=x)); yl = int(round(yl)); self.oov += int(rest[0].reshape(-1)[0]) if rest else 0
         return audio[: max(yl, 1) * 256].astype(np.float32), yl >= 1533
 
+    def _transform_vi_segments(self, text, trace):
+        spans = trace.get('spans', [])
+        norm_ranges = trace.get('protected_ranges', [])
+        if not spans or len(spans) != len(norm_ranges):
+            out = latin_to_vi(text, self.vn, self.glossary) if self.vn is not None else text
+            out = out.lower()
+            trace['tts_input_text'] = out
+            trace['tts_input_protected_ranges'] = []
+            return out
+        parts = []
+        tts_ranges = []
+        span_mapping = []
+        cursor = 0
+        pos = 0
+        for idx, (sp, (na, nb)) in enumerate(zip(spans, norm_ranges)):
+            gap = text[cursor:na]
+            if self.vn is not None:
+                gap = latin_to_vi(gap, self.vn, self.glossary)
+            gap = gap.lower()
+            parts.append(gap)
+            pos += len(gap)
+
+            seg = text[na:nb]
+            if self.vn is not None:
+                seg = latin_to_vi(seg, self.vn, self.glossary)
+            seg = seg.lower()
+            ta = pos
+            parts.append(seg)
+            pos += len(seg)
+            tb = pos
+            tts_ranges.append((ta, tb))
+            span_mapping.append({
+                'span_index': idx,
+                'raw': sp.get('raw', ''),
+                'norm_range': [na, nb],
+                'tts_range': [ta, tb],
+                'status': 'mapped',
+            })
+            cursor = nb
+        tail = text[cursor:]
+        if self.vn is not None:
+            tail = latin_to_vi(tail, self.vn, self.glossary)
+        parts.append(tail.lower())
+        out = ''.join(parts)
+        trace['tts_input_text'] = out
+        trace['tts_input_protected_ranges'] = tts_ranges
+        trace['span_mapping'] = span_mapping
+        return out
+
     def synthesize(self, text):
+        oov_before = self.oov
         if self.tts_format == 'legacy':
             orig = text
             if self.vn is not None: text = latin_to_vi(text, self.vn, self.glossary)
             text = normalize(text.lower(), 'vi')
             self.normalized_text = text; self.tts_input_text = text
             self.format_trace = {'stage': 'tts_legacy', 'input': orig, 'output': text, 'spans': [], 'protected_ranges': [], 'warnings': []}
-            return _join(adaptive(text, self.max_units, 'word', self._synth), self.sr)
+            waves = adaptive(text, self.max_units, 'word', self._synth)
+            oov_delta = self.oov - oov_before
+            self.last_oov_delta = oov_delta
+            self.format_trace['oov_delta'] = oov_delta
+            return _join(waves, self.sr)
         text, self.format_trace = _tts_format.prepare(text, 'vi', mode=self.tts_format)
         self.normalized_text = text
-        if self.vn is not None: text = latin_to_vi(text, self.vn, self.glossary)     # words outside Piper's table would be silently dropped
-        text = text.lower()
+        text = self._transform_vi_segments(text, self.format_trace)     # preserve exact span mapping across latin_to_vi
         self.tts_input_text = text
         def counter(s):
             byte_count = len(unicodedata.normalize('NFC', s).encode('utf-8'))
             return max(len(s.split()), (byte_count*self.max_units+511)//512)
-        return _join(_tts_format.adaptive(text, 'vi', self.max_units, 'word', self._synth, self.format_trace, counter=counter), self.sr)
+        utf8_counter = lambda s: len(unicodedata.normalize('NFC', s).encode('utf-8'))
+        waves = _tts_format.adaptive(text, 'vi', self.max_units, 'word', self._synth, self.format_trace, counter=counter, preprocessed_counter=utf8_counter)
+        oov_delta = self.oov - oov_before
+        self.last_oov_delta = oov_delta
+        self.format_trace['oov_delta'] = oov_delta
+        self.format_trace['preprocessed_chunk_lengths'] = [c['utf8_bytes'] for c in self.format_trace.get('synthesized_chunks', [])]
+        return _join(waves, self.sr)
 
 
 class TtsZh:
@@ -121,7 +181,10 @@ class TtsZh:
         self.tts_format = _tts_format.resolve_mode(tts_format)
 
     def _synth(self, piece):
-        b = unicodedata.normalize("NFC", piece).encode("utf-8")[:112]
+        b = unicodedata.normalize("NFC", piece).encode("utf-8")
+        if len(b) > 112 and self.tts_format != 'legacy':
+            raise ValueError('Melo input exceeds 112 UTF-8 bytes')
+        b = b[:112]
         while True:                                            # never cut inside a UTF-8 character
             try: b.decode("utf-8"); break
             except UnicodeDecodeError: b = b[:-1]
@@ -138,7 +201,13 @@ class TtsZh:
             return _join(adaptive(self.tts_input_text, self.max_units, 'char', self._synth), self.sr)
         text, self.format_trace = _tts_format.prepare(text, 'zh', mode=self.tts_format)
         self.normalized_text = text; self.tts_input_text = text
-        return _join(_tts_format.adaptive(text, 'zh', self.max_units, 'char', self._synth, self.format_trace), self.sr)
+        def counter(s):
+            byte_count = len(unicodedata.normalize('NFC', s).encode('utf-8'))
+            return max(len(s), (byte_count * self.max_units + 111) // 112)
+        utf8_counter = lambda s: len(unicodedata.normalize('NFC', s).encode('utf-8'))
+        waves = _tts_format.adaptive(text, 'zh', self.max_units, 'char', self._synth, self.format_trace, counter=counter, preprocessed_counter=utf8_counter)
+        self.format_trace['preprocessed_chunk_lengths'] = [c['utf8_bytes'] for c in self.format_trace.get('synthesized_chunks', [])]
+        return _join(waves, self.sr)
 
 
 class TtsEnKo:
@@ -173,6 +242,6 @@ class TtsEnKo:
         # Hangul expands to Jamo under NFKD; budget the actual graph input,
         # including language markers and preprocessing expansions.
         counter = lambda s: len(self._clean(self.p._preprocess_text(s, self.lang)))
-        result = _tts_format.adaptive(text, self.lang, self.N, 'char', self._synth, self.format_trace, counter=counter)
-        self.format_trace['preprocessed_chunk_lengths'] = [counter(p) for p in self.format_trace.get('planned_chunks', [])]
+        result = _tts_format.adaptive(text, self.lang, self.N, 'char', self._synth, self.format_trace, counter=counter, preprocessed_counter=counter)
+        self.format_trace['preprocessed_chunk_lengths'] = [c['preprocessed_length'] for c in self.format_trace.get('synthesized_chunks', [])]
         return _join([w for w in result if len(w)], self.sr)

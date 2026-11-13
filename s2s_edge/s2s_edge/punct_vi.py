@@ -14,6 +14,7 @@ Parity of this port with the reference implementation: tools/check_punct_vi.py."
 import os, re, unicodedata
 from difflib import SequenceMatcher
 import numpy as np
+from .numeric_guard import GuardReport, extract_known_numeric_spans, guard_source_numeric_changes
 
 START = "$START"
 LABELS = ["$KEEP", "$TRANSFORM_CASE_CAPITAL", "$APPEND_,", "$APPEND_.", "$TRANSFORM_VERB_VB_VBN", "$TRANSFORM_CASE_UPPER", "$APPEND_:", "$APPEND_?",
@@ -37,7 +38,8 @@ class WordPiece:
     """BertNormalizer(clean_text, handle_chinese_chars, no lowercase, no accent strip) + BertPreTokenizer + WordPiece('##', [UNK], 100 chars)."""
 
     def __init__(self, vocab_path):
-        self.vocab = {w: i for i, w in enumerate(open(vocab_path, encoding="utf-8").read().split("\n")) if w}
+        with open(vocab_path, encoding="utf-8") as fh:
+            self.vocab = {w: i for i, w in enumerate(fh.read().split("\n")) if w}
         self.unk = self.vocab["[UNK]"]; self.start_id = len(self.vocab)          # "$START" was added after the vocabulary (id 38168)
 
     def _pieces(self, word):
@@ -92,36 +94,79 @@ def _case(token, action):
 def load_verb_forms(path):
     """verb-form-vocab.txt ('ba_3:VB_VBN' ...): the reference repurposes GECToR's English verb-form labels for Vietnamese number words -> digits."""
     dec = {}
-    for line in open(path, encoding="utf-8"):
-        if ":" not in line: continue
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            if ":" not in line: continue
         words, tags = line.split(":"); w1, w2 = words.split("_"); t1, t2 = tags.split("_"); k = f"{w1}_{t1}_{t2.strip()}"
         if k not in dec: dec[k] = w2
     return dec
 
 
+def _protected_edit_constraints(tokens):
+    """Identify token-boundary indices inside protected spans where punct/case/verb edits must be blocked."""
+    text = " ".join(tokens)
+    spans = extract_known_numeric_spans(text, "vi")
+    # Also protect contiguous Vietnamese spoken numeral sequences and "số không" against internal punctuation.
+    word_matches = list(re.finditer(r"[^\W\d_]+", text, re.UNICODE))
+    words_low = [m.group(0).casefold() for m in word_matches]
+    spoken_words = {
+        "không", "một", "mốt", "hai", "ba", "tư", "bốn", "năm", "lăm", "nhăm",
+        "sáu", "bảy", "bẩy", "tám", "chín", "mười", "mươi", "linh", "lẻ",
+        "trăm", "nghìn", "ngàn", "triệu", "tỷ", "tỉ", "phẩy", "âm", "rưỡi",
+    }
+    protected_ranges = [(sp.start, sp.end, sp.signature is None) for sp in spans]
+    wi = 0
+    while wi < len(word_matches):
+        if words_low[wi] in spoken_words:
+            wj = wi + 1
+            while wj < len(word_matches) and words_low[wj] in spoken_words:
+                wj += 1
+            prev_w = words_low[wi - 1] if wi > 0 else ""
+            if (wj - wi) >= 2 or (wj - wi == 1 and words_low[wi] == "không" and prev_w == "số"):
+                protected_ranges.append((word_matches[wi].start(), word_matches[wj - 1].end(), False))
+            wi = wj
+        else:
+            wi += 1
+
+    tok_offsets = []
+    pos = 0
+    for tok in tokens:
+        tok_offsets.append((pos, pos + len(tok)))
+        pos += len(tok) + 1
+
+    blocked_append_after = set()
+    opaque_token_idx = set()
+    for idx, (ta, tb) in enumerate(tok_offsets):
+        for ra, rb, is_opaque in protected_ranges:
+            if is_opaque and not (tb <= ra or ta >= rb):
+                opaque_token_idx.add(idx)
+            # If the gap immediately after token `idx` is strictly inside a protected range, block $APPEND_ after it.
+            if ra <= ta and tb < rb:
+                blocked_append_after.add(idx)
+    return blocked_append_after, opaque_token_idx
+
+
 def _apply(tokens, edits, verbs=None):
-    """utils.get_target_sent_by_edits restricted to the labels this model has (case / verb-form transforms, appends, merge)."""
+    """utils.get_target_sent_by_edits restricted to safe case/append labels (never altering token identity or numeric spans)."""
+    blocked_append_after, opaque_token_idx = _protected_edit_constraints(tokens)
     t = tokens[:]; shift = 0
     for start, end, label in edits:
-        pos = start + shift
         if start < 0: continue
+        if label.startswith("$TRANSFORM_VERB_") or label.startswith("$MERGE_"):
+            # Preserve exact source token order and never rewrite spoken words into digits (e.g. "không" -> "0").
+            continue
+        pos = start + shift
         src = t[pos] if len(t) > pos else ""
-        if start == end:                                                       # append
+        if start == end:                                                       # append after original token (start - 1)
+            if (start - 1) in blocked_append_after:
+                continue
             word = label.replace("$APPEND_", "")
             if (pos < len(t) and t[pos] == word) or (pos > 0 and t[pos - 1] == word): continue
             t[pos:pos] = [word]; shift += 1
         elif label.startswith("$TRANSFORM_CASE"):
+            if start in opaque_token_idx:
+                continue
             t[pos] = _case(src, label) if src else src
-        elif label.startswith("$TRANSFORM_VERB_"):                              # number word -> digits ("bảy" -> "7"), unknown -> unchanged
-            w = (verbs or {}).get(f"{src}_{label[len('$TRANSFORM_VERB_'):]}")
-            t[pos] = w if w is not None else src
-        elif label.startswith("$MERGE_"):
-            t[pos + 1: pos + 1] = [label]; shift += 1
-    if any(x.startswith("$MERGE_") for x in t):
-        if t and t[0].startswith("$MERGE_"): t = t[1:]
-        if t and t[-1].startswith("$MERGE_"): t = t[:-1]
-        line = " ".join(t).replace(" $MERGE_HYPHEN ", "-").replace(" $MERGE_SPACE ", "")
-        t = re.sub(r"([\.\,\?\:]\s+)+", r"\1", line).split()
     return t
 
 
@@ -129,12 +174,15 @@ def _softmax(x): e = np.exp(x - x.max(-1, keepdims=True)); return e / e.sum(-1, 
 
 
 class ViCapu:
-    def __init__(self, onnx_path, vocab_path, verb_path=None, threads=4, iterations=3, min_len=3, chunk=48, overlap=12, min_words_cut=6, max_len=64):
-        import onnxruntime as ort
+    def __init__(self, onnx_path, vocab_path, verb_path=None, threads=4, iterations=3, min_len=3, chunk=48, overlap=12, min_words_cut=6, max_len=64, ort_policy=None):
+        from .backends import create_cpu_ort_session
         verb_path = verb_path or os.path.join(os.path.dirname(vocab_path), "verb-form-vocab.txt"); self.verbs = load_verb_forms(verb_path) if os.path.exists(verb_path) else {}
-        so = ort.SessionOptions(); so.intra_op_num_threads = threads
-        self.s = ort.InferenceSession(onnx_path, so, providers=["CPUExecutionProvider"]); self.names = [i.name for i in self.s.get_inputs()]
+        self.s, self.ort_attempts, self.effective_ort_level, self.ort_fallback, self.ort_policy, _, _, _ = create_cpu_ort_session(
+            onnx_path, ort_policy=ort_policy, large_or_ext=False, intra_op_num_threads=threads
+        )
+        self.names = [i.name for i in self.s.get_inputs()]
         self.wp = WordPiece(vocab_path); self.iterations, self.min_len, self.chunk, self.overlap, self.min_words_cut, self.max_len = iterations, min_len, chunk, overlap, min_words_cut, max_len
+        self.last_validation: GuardReport | None = None
 
     def _tag(self, words):
         ids, offs = self.wp.encode_words(words[: self.max_len])
@@ -162,11 +210,49 @@ class ViCapu:
             if stop: break
         return final
 
-    def _chunks(self, w):
+    def _chunks_with_ranges(self, w):
         n, c, o = len(w), self.chunk, self.overlap
-        if n <= c: return [w]
-        if n < c * 2 - o: k = (n + o + 1) // 2; return [w[:k], w[k - o:]]
-        return [w[i: i + c] for i in range(0, n - o, c - o)]
+        if n <= c:
+            return [((0, n), w)]
+        if n < c * 2 - o:
+            k = (n + o + 1) // 2
+            return [((0, k), w[:k]), ((k - o, n), w[k - o:])]
+        return [((i, min(n, i + c)), w[i: i + c]) for i in range(0, n - o, c - o)]
+
+    def _chunks(self, w):
+        return [chunk for _, chunk in self._chunks_with_ranges(w)]
+
+    @staticmethod
+    def _non_punct(tokens):
+        return [t for t in tokens if t not in PUNC]
+
+    @staticmethod
+    def _prefix_through_nth_word(tokens, n_words):
+        """Return slice of `tokens` containing the first `n_words` non-punctuation words (plus immediate trailing punct)."""
+        if n_words <= 0:
+            return []
+        count = 0
+        end_idx = 0
+        for idx, tok in enumerate(tokens):
+            if tok not in PUNC:
+                if count == n_words:
+                    break
+                count += 1
+            end_idx = idx + 1
+        return tokens[:end_idx]
+
+    @staticmethod
+    def _suffix_from_nth_word(tokens, skip_words):
+        """Return slice of `tokens` starting at the `skip_words`-th non-punctuation word."""
+        if skip_words <= 0:
+            return list(tokens)
+        count = 0
+        for idx, tok in enumerate(tokens):
+            if tok not in PUNC:
+                if count == skip_words:
+                    return tokens[idx:]
+                count += 1
+        return []
 
     def _merge(self, tokens, nxt):
         if not tokens: return nxt
@@ -186,28 +272,112 @@ class ViCapu:
         raise ValueError("no overlap")                                          # the reference prints and keeps the previous result
 
     def __call__(self, text):
+        self.last_validation = None
         words = text.split()
+        if not words:
+            self.last_validation = guard_source_numeric_changes(text, text, "vi")
+            return text
         if len(words) < self.min_len:
             from .textnorm import vi_punct
-            return vi_punct(text) if words else text
-        parts = [self._one(c) if len(c) >= self.min_len else c for c in self._chunks(words)]
-        out = []
-        if len(parts) == 1: out = parts[0]
+            out_text = vi_punct(text)
+            report = guard_source_numeric_changes(text, out_text, "vi")
+            if report.status == "invalid":
+                out_text = text
+                report.fallback_policy = "fallback_to_raw_source"
+            self.last_validation = report
+            return out_text
+
+        chunk_items = self._chunks_with_ranges(words)
+        parts = [self._one(c) if len(c) >= self.min_len else c for _, c in chunk_items]
+        merge_warnings = []
+
+        def _tokens_match(toks, expected_words):
+            return [t.lower() for t in self._non_punct(toks)] == [w.lower() for w in expected_words]
+
+        if len(parts) == 1:
+            out = parts[0]
+            if not _tokens_match(out, words):
+                merge_warnings.append({"code": "capu_token_alignment_fallback", "reason": "single_chunk_token_mismatch"})
+                out = list(words)
         else:
-            for p in parts:
-                try: out = self._merge(out, p)
-                except Exception: pass
-        return re.sub(r"\s+([:.,?])", r"\1", " ".join(out))
+            ((first_a, first_b), _), first_part = chunk_items[0], parts[0]
+            if not _tokens_match(first_part, words[first_a:first_b]):
+                merge_warnings.append({"code": "capu_chunk_alignment_fallback", "chunk_start": first_a, "chunk_end": first_b})
+                out = list(words[first_a:first_b])
+            else:
+                out = list(first_part)
+            covered_end = first_b
+
+            for ((c_start, c_end), _), p in zip(chunk_items[1:], parts[1:]):
+                p_clean = list(p)
+                if not _tokens_match(p_clean, words[c_start:c_end]):
+                    merge_warnings.append({"code": "capu_chunk_alignment_fallback", "chunk_start": c_start, "chunk_end": c_end})
+                    p_clean = list(words[c_start:c_end])
+                merged = None
+                merge_err = None
+                try:
+                    cand = self._merge(out, p_clean)
+                    if _tokens_match(cand, words[:c_end]):
+                        merged = cand
+                    else:
+                        merge_err = "overlap_alignment_mismatch"
+                except Exception as exc:
+                    merge_err = repr(exc)
+
+                if merged is None:
+                    merge_warnings.append({
+                        "code": "overlap_merge_fallback",
+                        "chunk_start": c_start,
+                        "chunk_end": c_end,
+                        "reason": merge_err or "overlap_merge_failed",
+                    })
+                    cut_src = min(covered_end, c_start + max(1, (covered_end - c_start) // 2))
+                    left = self._prefix_through_nth_word(out, cut_src)
+                    right = self._suffix_from_nth_word(p_clean, cut_src - c_start)
+                    spliced = left + right
+                    if _tokens_match(spliced, words[:c_end]):
+                        out = spliced
+                    else:
+                        out = self._prefix_through_nth_word(out, c_start) + p_clean
+                        if not _tokens_match(out, words[:c_end]):
+                            out = list(words[:c_end])
+                else:
+                    out = merged
+                covered_end = c_end
+
+        out_text = re.sub(r"\s+([:.,?])", r"\1", " ".join(out))
+        report = guard_source_numeric_changes(text, out_text, "vi")
+        if merge_warnings:
+            report.warnings.extend(merge_warnings)
+            if report.fallback_policy is None:
+                report.fallback_policy = "source_indexed_overlap_splice"
+        if report.status == "invalid":
+            from .textnorm import vi_punct
+            fallback_text = vi_punct(text)
+            fb_report = guard_source_numeric_changes(text, fallback_text, "vi")
+            if fb_report.status == "invalid":
+                fallback_text = text
+                fb_report = guard_source_numeric_changes(text, fallback_text, "vi")
+                fb_report.fallback_policy = "fallback_to_raw_source"
+            else:
+                fb_report.fallback_policy = "fallback_to_vi_punct"
+            fb_report.warnings.extend(merge_warnings)
+            fb_report.warnings.append({"code": "capu_output_rejected", "issues": list(report.issues)})
+            self.last_validation = fb_report
+            return fallback_text
+
+        self.last_validation = report
+        return out_text
 
 
 _INSTANCE = None
 
 
-def get(assets_dir):
+def get(assets_dir, ort_policy=None):
     """Lazy singleton; None when the model files are not in the package (the caller then falls back to vi_punct)."""
     global _INSTANCE
     if _INSTANCE is None:
         d = os.path.join(assets_dir, "vi_capu"); onnx, vocab = os.path.join(d, "vibert_capu_int8.onnx"), os.path.join(d, "vocab.txt")
         if not (os.path.exists(onnx) and os.path.exists(vocab)): return None
-        _INSTANCE = ViCapu(onnx, vocab)
+        _INSTANCE = ViCapu(onnx, vocab, ort_policy=ort_policy)
     return _INSTANCE

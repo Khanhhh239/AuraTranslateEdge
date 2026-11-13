@@ -667,7 +667,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--run-id", required=True, help="Unique immutable run ID (cannot overwrite existing dirs or protected baseline/t3_ablation).")
     ap.add_argument("--split", default=str(ROOT / "results/next_steps/manifests/t3_ablation_split.json"))
     ap.add_argument("--out-root", default=str(harness.DEFAULT_OUT_ROOT))
-    ap.add_argument("--fixed-vad", default="legacy", choices=["legacy", "upstream"])
+    ap.add_argument("--fixed-vad", default="legacy", choices=["legacy", "upstream", "hybrid"])
     ap.add_argument("--seed", type=int, default=20261113)
     ap.add_argument("--repeats", type=int, default=3)
     ap.add_argument("--models", default=str(harness.DEFAULT_MODELS))

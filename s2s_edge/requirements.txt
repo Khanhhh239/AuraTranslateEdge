@@ -5,8 +5,9 @@ sentencepiece
 kaldi-native-fbank
 onnxruntime
 psutil
-python-crfsuite
-# optional
-sounddevice
-jiwer
-sacrebleu
+# optional (installed best-effort by install.sh when present in offline wheelhouse):
+# python-crfsuite
+# openpyxl
+# sounddevice
+# jiwer
+# sacrebleu

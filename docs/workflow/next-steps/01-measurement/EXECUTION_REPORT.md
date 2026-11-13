@@ -1,7 +1,7 @@
 # 01-measurement: Kết quả thực thi
 
-- **Task ID / Plan:** `01-measurement` (`docs/workflow/next-steps/01-measurement/PLAN.md`) + sửa 5 P1 findings hậu review (`docs/workflow/next-steps/01-measurement/REVIEW.md`: R1–R5)
-- **Branch / Base commit (HEAD) / Head commit:** Branch `feat/onevoice-e2e-tts-hybrid`, Base & Head commit `43ea359b42ae274f32f6e24eeb9b5018dc2a93ea` (baseline trước Plan 01 là uncommitted working tree được kiểm tra khớp 100% với `docs/workflow/next-steps/baseline_manifest.json` và đóng băng bất biến tại `results/next_steps/baseline_freeze/`).
+- **Task ID / Plan:** `01-measurement` (`docs/workflow/next-steps/01-measurement/PLAN.md`) + R1–R5 (`REVIEW.md`) + P2 & AIBOX 8550 portability (`REVIEW_ROUND2.md`)
+- **Branch / Base commit (HEAD):** Branch `feat/plan01-measurement`, Base `HEAD` `ecf4e945a95e16d553edbe7913cd49245980931a` (thay thế mốc cũ `43ea359b42ae274f32f6e24eeb9b5018dc2a93ea`; baseline freeze ban đầu trước Plan 01 vẫn giữ bất biến tại `results/next_steps/baseline_freeze/`, còn working tree hiện tại có thêm phần tích hợp `asr-speed-accuracy`, fix P2 `REVIEW_ROUND2`, tương thích AIBOX 8550 và chỉnh sửa các plan chưa commit).
 - **`git diff --stat` (tracked files so với `HEAD`, gồm cả baseline pre-Plan-01 chưa commit):**
   `21 files changed, 762 insertions(+), 118 deletions(-)` (trong đó các file pre-Plan-01 `README.md`, `results/mic_web/server.pid`, `sources.json`, `s2s_edge/s2s_edge/textnorm.py`, `s2s_edge/tools/eval_vi_punct.py`, `tools/build_nllb_split.py`, `tools/check_mt_numerics.py`, `tools/train_identifier_tagger.py`, `tools/verify_neural_fix_run.py` được giữ nguyên, không chỉnh sửa trong Plan 01 hay vòng R1–R5).
 - **Phạm vi R1–R5 (bổ sung & khắc phục theo `REVIEW.md`):**
@@ -213,3 +213,25 @@ cd /Users/khoa/study/Onevoice_final_ves/OneVoice_E2E_HybridTTS
 ```
 
 *(Lưu ý: lệnh trên không đụng vào thư mục evidence cũ `results/asr_integration/{before,after}` hay server đang chạy trên cổng `8766`; nếu muốn dọn luôn report này thì xóa thêm `docs/workflow/next-steps/01-measurement/EXECUTION_REPORT.md` và `results/next_steps/` sau khi rollback xong.)*
+
+---
+
+### Khắc phục `REVIEW_ROUND2.md` (P2) & Cập nhật Sẵn sàng AIBOX 8550
+
+1. **Sửa P2 Spawn Race trong `tools/start_s2s_web.py`:**
+   - Trong vòng polling sau `Popen(...)`: kiểm tra `proc.poll()` **trước** khi nhận health; xác nhận `health.get("pid") == proc.pid` và `compare_server_state(health, req_profile, disk_fp, requested_backend=..., requested_models=...)` trước khi chấp nhận started/reloaded; chỉ ghi `server.pid` **sau** khi xác nhận quyền sở hữu tiến trình, tránh ghi đè PID hay tái sử dụng nhầm server lạ trên cùng cổng.
+   - Bổ sung `--backend {cpu,npu}`, `--models`, `--keep-loaded` cho `start_s2s_web.py` & `s2s_web.py`, và `--models`/`--backend` cho `tools/run_e2e.py`. Mặc định `S2S_NEURAL_TN=0` khi `--backend npu` hoặc hệ không phải `darwin` (`Linux aarch64` / AIBOX 8550), giữ nguyên mặc định `1` trên macOS CPU.
+   - Khi `backend == "npu"` hoặc `--keep-loaded`, `tools/s2s_web.py` giữ `Registry`/`Translator` resident giữa các job (khôi phục wrapper tiến độ an toàn trong `finally`) để tránh cold reload ~2.2 GB QNN binaries trên AIBOX 8550.
+
+2. **Tương thích `s2s_edge` & đóng gói offline AIBOX 8550 (`QCS8550`, `linux/aarch64`, không Metal/MPS):**
+   - `s2s_edge/s2s_edge/neural_textnorm.py`: thêm `default_source_mode`, `default_hf_home`, `check_neural_tn_available` — fail tường minh (`RuntimeError`) nhắc đặt `S2S_NEURAL_TN=0` khi yêu cầu neural normalization trên Linux/thiếu Metal hoặc MPS (không silent fallback).
+   - `s2s_edge/s2s_edge/identifier_tagger.py` (+ `hybrid_textnorm.py`, `neural_textnorm.py`): thêm `find_crf_model()` tìm lần lượt qua `S2S_CRF_MODEL`, `<pkg>/assets/identifier.crfsuite`, `<pkg>/models/normalization/identifier.crfsuite`, `<repo>/models/normalization/identifier.crfsuite`.
+   - `s2s_edge/s2s_edge/backends.py` & `punct_vi.py`: tách helper `ort_optimization_plan()` và `create_cpu_ort_session()` để `ViCapu` (`vibert_capu_int8.onnx`) dùng chung cấu hình `enable_cpu_mem_arena=False`, `enable_mem_pattern=False` và fallback `BASIC -> DISABLE_ALL`; đóng file handle gọn bằng `with open(...)` trong `conversation.py`, `tts.py`, `names.py`.
+   - `s2s_edge/requirements.txt` & `s2s_edge/tools/build_package.py`: tách gói tùy chọn (`python-crfsuite`, `openpyxl`, `sounddevice`, `jiwer`, `sacrebleu`) khỏi bước `pip install -r requirements.txt` bắt buộc trong `install.sh` (cài best-effort từng gói tùy chọn), copy `identifier.crfsuite` vào `assets/`, kiểm tra wheelhouse qua `check_wheelhouse()` (`--strict-wheelhouse`), mặc định `S2S_NEURAL_TN=0` & `S2S_TTS_FORMAT=hybrid` trong `run_demo.sh`.
+
+3. **Kiểm chứng mới (host macOS arm64, Python 3.11.15):**
+   - Bổ sung `tests/test_aibox8550_and_launcher_p2.py` (10 unit tests cho P2 spawn race/foreign PID, mock reload trong `tests/test_runtime_profiles.py`, AIBOX defaults & fail tường minh, `find_crf_model`, `s2s_web` NPU keep-loaded + 4 ngôn ngữ đích, `build_package.py --strict-wheelhouse`).
+   - Lệnh chạy toàn bộ suite:
+     `/private/tmp/s2s-original-env/bin/python -m unittest tests/test_runtime_profiles.py tests/test_aibox8550_and_launcher_p2.py tests/test_asr_speed_accuracy_integration.py tests/test_asr_integration.py tests/test_asr_evaluation_contract.py tests/test_entity_scorer.py tests/tests_identifiers.py tests/test_hybrid_format.py -v`
+     → **`Ran 67 tests in 53.118s — OK` (`exit 0`)**.
+   - **Chưa chạy trên phần cứng thật:** Chưa chạy với binary `models_qcs8550` trên NPU QCS8550 (`backend=npu`), offline wheelhouse `linux_aarch64`, hay `tools/session0.sh` / `tools/runbook.sh` (`A0–A6`) vì chưa có thiết bị AIBOX 8550 gắn trực tiếp ở host hiện tại.

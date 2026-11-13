@@ -5,10 +5,46 @@ ByT5-Vi and NVIDIA T5: task-finetuned verbalization. Identifier character readin
 uses the user's explicit alphabet policy. No format-specific TN regexes or
 test-answer substitutions. S2S_NEURAL_TN=1 enables the new path.
 """
-import os,time,json,unicodedata
+import importlib,os,sys,tempfile,time,json,unicodedata
 from pathlib import Path
+from .numeric_guard import extract_known_numeric_spans, guard_source_numeric_changes
+from .source_segmentation import split_preserving_spans
 
 _MODEL=None
+
+def default_source_mode(backend=None,platform_name=None):
+    """Default to '0' on NPU backends or non-Darwin edge targets (e.g. AIBOX 8550), '1' on macOS CPU."""
+    plat=sys.platform if platform_name is None else str(platform_name)
+    if str(backend or 'cpu').strip().lower()=='npu' or not plat.startswith('darwin'):
+        return '0'
+    return '1'
+
+def default_hf_home(platform_name=None):
+    plat=sys.platform if platform_name is None else str(platform_name)
+    if plat.startswith('darwin'):return '/private/tmp/s2s-hf'
+    return str(Path(tempfile.gettempdir())/'s2s-hf')
+
+def check_neural_tn_available(platform_name=None,model_path=None,require_mps=False,check_model_exists=True):
+    """Fail loudly when S2S_NEURAL_TN=1 is requested on unsupported hardware (Linux/AIBOX 8550) or missing MLX/MPS."""
+    plat=sys.platform if platform_name is None else str(platform_name)
+    if not plat.startswith('darwin'):
+        raise RuntimeError(f'Neural source normalization (S2S_NEURAL_TN=1) requires macOS Apple Metal / MLX+MPS and is unsupported on platform={plat!r}; use S2S_NEURAL_TN=0 on AIBOX 8550 / Linux.')
+    try:
+        importlib.import_module('mlx_lm')
+    except ImportError as exc:
+        raise RuntimeError(f'Neural source normalization (S2S_NEURAL_TN=1) requires mlx_lm on Apple Metal ({exc}); use S2S_NEURAL_TN=0.') from exc
+    root=Path(__file__).resolve().parents[2]
+    target=Path(model_path or os.environ.get('S2S_TN_MODEL',str(root/'models/source/qwen3-4b-instruct-mlx4')))
+    if check_model_exists and not target.exists():
+        raise RuntimeError(f'Missing neural normalization model directory: {target}. Set S2S_NEURAL_TN=0 to run rule/hybrid edge preparation.')
+    if require_mps:
+        try:
+            torch=importlib.import_module('torch')
+        except ImportError as exc:
+            raise RuntimeError(f'Neural source normalization requires PyTorch MPS ({exc}); use S2S_NEURAL_TN=0.') from exc
+        if not getattr(getattr(torch,'backends',None),'mps',None) or not torch.backends.mps.is_available():
+            raise RuntimeError('Neural source normalization requires Apple MPS GPU (torch.backends.mps.is_available() is False); use S2S_NEURAL_TN=0.')
+    return target
 
 def enabled():return os.environ.get('S2S_NEURAL_TN','0')=='1'
 
@@ -19,6 +55,7 @@ def get():
 
 class NeuralNormalizer:
     def __init__(self):
+        check_neural_tn_available(check_model_exists=False)
         from mlx_lm import load
         root=Path(__file__).resolve().parents[2]
         self.path=Path(os.environ.get('S2S_TN_MODEL',str(root/'models/source/qwen3-4b-instruct-mlx4')))
@@ -45,15 +82,46 @@ class NeuralNormalizer:
         if log:
             with open(log,'a',encoding='utf-8') as f:f.write(json.dumps(record,ensure_ascii=False)+'\n')
 
+    def _guard_canonical_identifiers(self, original, converted_text, converted, lang):
+        """Validate canonical_identifiers did not corrupt any existing numeric/opaque span."""
+        if not converted:
+            return guard_source_numeric_changes(original, converted_text, lang)
+        # Ensure none of the converted source substrings overlapped an already-typed numeric/opaque span.
+        orig_spans = extract_known_numeric_spans(original, lang)
+        cursor = 0
+        for item in converted:
+            src_sub = item.get('source', '')
+            pos = original.find(src_sub, cursor)
+            if pos < 0:
+                return guard_source_numeric_changes(original, converted_text, lang)
+            end = pos + len(src_sub)
+            if any(not (end <= sp.start or pos >= sp.end) for sp in orig_spans):
+                return guard_source_numeric_changes(original, converted_text, lang)
+            cursor = end
+        # Compare non-converted regions by masking converted spans in original and converted_text.
+        masked_orig = original
+        masked_conv = converted_text
+        for idx, item in enumerate(converted):
+            tag = f' __ID_{idx}__ '
+            masked_orig = masked_orig.replace(item['source'], tag, 1)
+            masked_conv = masked_conv.replace(item['canonical'], tag, 1)
+        return guard_source_numeric_changes(masked_orig, masked_conv, lang)
+
     def prepare_source(self,text,lang,max_tokens,encode):
-        """Learn sentence boundaries/formatting, verify no ASR words/digits changed.
+        """Learn sentence boundaries/formatting, verify no ASR words/digits or numeric semantics changed.
 
         The downstream atomic MT path avoids the original punctuation splitter,
         which split at every period (including decimal points).
         """
         original=text
         text,converted=self.canonical_identifiers(text,lang)
-        if converted:self._record({'stage':'asr_identifiers','lang':lang,'input':original,'output':text,'converted':converted,'policy':'recognized digit words to literal identifier characters; no missing digits inferred'})
+        id_report=self._guard_canonical_identifiers(original,text,converted,lang)
+        if id_report.status=='invalid':
+            self._record({'stage':'asr_identifiers','lang':lang,'input':original,'output':original,'converted':converted,'fallback_policy':'fallback_to_raw_source','numeric_validation':id_report.to_dict()})
+            text=original
+            converted=[]
+        elif converted:
+            self._record({'stage':'asr_identifiers','lang':lang,'input':original,'output':text,'converted':converted,'policy':'recognized digit words to literal identifier characters; no missing digits inferred','numeric_validation':id_report.to_dict()})
         instruction=('You restore punctuation and split an ASR transcript for machine translation. '
             'Return only JSON {"segments": ["...", "..."]}. Keep the SAME language and EXACT words and digits in their original order. '
             'Only punctuation, whitespace and capitalization may change. Restore time formatting when clear from context. '
@@ -65,6 +133,9 @@ class NeuralNormalizer:
         messages=[{'role':'system','content':instruction},{'role':'user','content':demo},{'role':'assistant','content':answer},{'role':'user','content':text}]
         def content(t):return ''.join(c.casefold() for c in t if c.isalnum() or unicodedata.category(c).startswith('S') or c=='%')
         start=time.perf_counter()
+        expected_spans=extract_known_numeric_spans(text,lang)
+        report=None
+        last_error=None
         for attempt in range(3):
             result,last=self._generate(messages)
             try:
@@ -72,20 +143,38 @@ class NeuralNormalizer:
                 if not isinstance(parts,list) or not parts or not all(isinstance(p,str) and p.strip() for p in parts):raise ValueError('invalid segment list')
                 if content(''.join(parts))!=content(text):raise ValueError('words or digits changed')
                 if any(len(encode(p))>max_tokens for p in parts):raise ValueError('segment too long for the MT graph')
+                joined=' '.join(parts)
+                report=guard_source_numeric_changes(text,joined,lang)
+                if report.status=='invalid':
+                    raise ValueError(f'numeric guard failed: {report.issues}')
+                part_span_count=sum(len(extract_known_numeric_spans(p,lang)) for p in parts)
+                if part_span_count!=len(expected_spans):
+                    raise ValueError('protected numeric span was split across segments')
                 break
             except (ValueError,KeyError,TypeError) as e:
+                last_error=str(e)
                 messages.extend([{'role':'assistant','content':result},{'role':'user','content':f'Invalid: {e}. Try again, copying every letter and digit from the original transcript exactly and splitting into shorter fragments. Original transcript: '+text}])
-        else:raise RuntimeError('Learned segmentation could not preserve source text within MT limits')
-        self._record({'stage':'asr_segmentation','lang':lang,'input':text,'output':parts,'seconds':time.perf_counter()-start,'attempts':attempt+1,'content_preserved':True})
+        else:
+            parts=split_preserving_spans(text,expected_spans,token_limit=max_tokens,encode=encode,lang=lang,merge_small=True)
+            report=guard_source_numeric_changes(text,' '.join(parts),lang)
+            report.fallback_policy='fallback_to_span_safe_split'
+            report.warnings.append({'code':'neural_segmentation_fallback','reason':last_error or 'max_attempts_exceeded'})
+            self._record({'stage':'asr_segmentation','lang':lang,'input':text,'output':parts,'seconds':time.perf_counter()-start,'attempts':3,'token_identity':bool(report.token_identity),'numeric_validation':report.to_dict(),'fallback_policy':report.fallback_policy})
+            return parts
+        self._record({'stage':'asr_segmentation','lang':lang,'input':text,'output':parts,'seconds':time.perf_counter()-start,'attempts':attempt+1,'token_identity':bool(report.token_identity),'numeric_validation':report.to_dict()})
         return parts
+
+    def _get_id_tagger(self):
+        if not hasattr(self,'id_tagger'):
+            from .identifier_tagger import IdentifierTagger,find_crf_model
+            self.id_tagger=IdentifierTagger(find_crf_model())
+        return self.id_tagger
 
     def canonical_identifiers(self,text,lang):
         """Protect learned spoken identifiers from lexical changes during MT."""
-        from .identifier_tagger import IdentifierTagger
-        if not hasattr(self,'id_tagger'):
-            self.id_tagger=IdentifierTagger(Path(__file__).resolve().parents[2]/'models/normalization/identifier.crfsuite')
+        tagger=self._get_id_tagger()
         edits=[];cursor=0
-        for span in self.id_tagger(text,lang):
+        for span in tagger(text,lang):
             chars=self.identifier_characters(span,lang)
             if chars is not None:
                 a=text.find(span,cursor)
@@ -112,10 +201,7 @@ class NeuralNormalizer:
         Alphabet/digit pronunciation is a generic symbol codec, not rules that
         parse phone/time/money formats. Detection is performed by the model.
         """
-        from .identifier_tagger import IdentifierTagger
-        if not hasattr(self,'id_tagger'):
-            self.id_tagger=IdentifierTagger(Path(__file__).resolve().parents[2]/'models/normalization/identifier.crfsuite')
-        spans=self.id_tagger(text,lang)
+        spans=self._get_id_tagger()(text,lang)
         digits={'vi':'không một hai ba bốn năm sáu bảy tám chín'.split(),'en':'zero one two three four five six seven eight nine'.split()}
         names={'vi':['a','bê','xê','đê','e','ép','giê','hát','i','giây','ca','en lờ','em','en','ô','pê','quy','a rờ','ét','tê','u','vê','đắp liu','ích','i dài','dét'],
                'en':['ay','bee','see','dee','ee','ef','gee','aitch','eye','jay','kay','el','em','en','oh','pee','cue','ar','ess','tee','you','vee','double you','ex','why','zee']}
@@ -135,6 +221,7 @@ class NeuralNormalizer:
         return out,spans
 
     def _vietnamese(self,text):
+        check_neural_tn_available(require_mps=True,check_model_exists=False)
         import torch
         from transformers import AutoTokenizer,AutoModelForSeq2SeqLM
         if self.vi_model is None:
@@ -202,6 +289,7 @@ class NeuralNormalizer:
             except (ValueError,TypeError,KeyError) as e:
                 messages.extend([{'role':'assistant','content':raw},{'role':'user','content':str(e)+'. Retry, copying only exact numeric expressions and covering all digits.'}])
         else:raise RuntimeError('English learned span detection failed source validation')
+        check_neural_tn_available(require_mps=True,check_model_exists=False)
         import torch
         from transformers import AutoTokenizer,AutoModelForSeq2SeqLM
         if not hasattr(self,'en_model'):

@@ -47,6 +47,10 @@ python -m s2s_edge live --auto --partner en --models models/models.json         
 ```
 Proper names (Latin names the Vietnamese / Chinese / Korean TTS cannot read), the glossary and the limits of mixed-language speech: `docs/conversation.md`.
 
+### ASR: multi-window buckets, RNN-T, host SenseVoice features, VAD hysteresis
+
+Each ASR model can configure multiple static windows (`asr_vi@<frames>`, `asr_xx_encoder@<LFR_frames>` in `models.json`); the pipeline picks the smallest window covering the utterance (`models.dev_asr_buckets.json`). Vietnamese Zipformer decodes with RNN-T when `asr_vi_decoder` + `asr_vi_joiner` are present (`S2S_VI_DECODE=ctc` disables), SenseVoice computes fbank+CMVN on the host when `S2S_SV_FRONTEND=host` or `"_sv_frontend": "host"`, and `--vad-profile hybrid` enables hysteresis tail retention plus pause-aligned Vietnamese punctuation (`S2S_VAD_MODE=hybrid|split|join`). Details: [`docs/asr_optimization.md`](docs/asr_optimization.md); standalone ASR eval: `python tools/eval_asr.py`, offline host tests: `python tools/test_asr_host.py`.
+
 ## On the device
 
 ```bash

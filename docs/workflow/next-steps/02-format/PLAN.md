@@ -1,10 +1,10 @@
 # P0: sửa formatter theo loại dữ liệu
 
-**Executor:** Antigravity. **Spec:** `../SPEC.md`. **Goal:** chặn lỗi parser đã biết, giữ nguyên giá trị và dấu câu. **Architecture:** candidate có boundary → chọn type → parse theo locale → render; không vá output theo chuỗi. **Tech:** Python grammar/CRF hiện có.
+**Executor:** Antigravity. **Spec:** `../SPEC.md`. **Goal:** chặn lỗi parser đã biết, giữ nguyên giá trị và dấu câu. **Architecture:** candidate có boundary → chọn type → parse theo locale → render; không vá output theo chuỗi. **Tech:** Python grammar/stdlib (tương thích Python ≥3.10 trên AIBOX 8550 `linux/aarch64`), CRF (`identifier.crfsuite`) tùy chọn — không đòi hỏi Metal/PyTorch/Qwen.
 
 ## Baseline và giới hạn
 
-Đọc `reports/tts_format_s2s_eval_2026-11-13.md`; freeze 17 edge cases từ JSON gốc mà báo cáo trỏ tới vào fixture không lẫn training. Giữ 55 ví dụ cũ. Mỗi task thêm đối chứng mới bằng seed cố định và test cả CRF bật/tắt; không dùng test để train CRF. Chạy sau khi 01 tạo baseline/config manifest; không cần đợi hoàn tất toàn bộ benchmark để bắt đầu parser tests.
+Đọc `reports/tts_format_s2s_eval_2026-11-13.md`; freeze 17 edge cases từ JSON gốc mà báo cáo trỏ tới vào fixture không lẫn training. Giữ 55 ví dụ cũ. Mỗi task thêm đối chứng mới bằng seed cố định và **test cả CRF bật (`assets/identifier.crfsuite` + `pycrfsuite`) lẫn CRF tắt (không có `pycrfsuite`/`crfsuite` trên wheelhouse `aarch64`)**; không dùng test để train CRF. Code trong `s2s_edge/` không dùng cú pháp chỉ có ở Python 3.11+ (phải chạy trên Python 3.10 `wheelhouse_cp310`). Chạy sau khi 01 tạo baseline/config manifest; không cần đợi hoàn tất toàn bộ benchmark trên hộp thật để bắt đầu parser tests.
 
 ## T1 - Candidate phone/mã có cấu trúc
 
@@ -41,6 +41,6 @@
 
 - [ ] Inject cap retry để test log cuối chứa đúng các piece đã được synth thành công; không mất thứ tự hoặc ghi lại parent như output đã thành công.
 - [ ] Test G2P thay độ dài và cùng lời đọc xuất hiện hai lần: mapping span không được bảo vệ nhầm occurrence. Nếu không map chắc chắn, warning rõ; không báo protected thành công bằng str.find mơ hồ.
-- [ ] TTS graph thật chỉ trên các case bị ảnh hưởng, mỗi ngôn ngữ có phone/time/CJK thích hợp; OOV báo delta theo lượt, không lấy bộ đếm cộng dồn.
+- [ ] TTS graph thật chỉ trên các case bị ảnh hưởng trên host CPU (`models.cpu.json`), bảo đảm giới hạn chunk khớp hợp đồng QCS8550 NPU trong `tts.py` (`piper ≤ 512 UTF-8 bytes / 26 words`, `supertonic ≤ 576 cps`, `melo UTF-8 bytes`); OOV báo delta theo lượt, không lấy bộ đếm cộng dồn.
 
-**Đạt vòng P0:** 55 ca cũ + 17 edge + bộ đối chứng mới qua expected span/value; TTS input đúng trên test có nhãn. WAV hợp lệ chỉ chứng minh runtime; nghe/ASR đối chiếu để riêng. Lưu `EXECUTION_REPORT.md`, test logs, JSON/WAV theo run ID. P1 biến thể `14h`, giờ chữ Hàn, `độ C/F`, nhãn ZIP chỉ bắt đầu sau các P0 này, không trộn thành một patch lớn.
+**Đạt vòng P0:** 55 ca cũ + 17 edge + bộ đối chứng mới qua expected span/value cả khi CRF bật và CRF tắt trên Python ≥3.10; TTS input đúng trên test có nhãn. WAV hợp lệ chỉ chứng minh runtime host; nghe/ASR đối chiếu và test TTS binary trên NPU AIBOX 8550 để riêng. Lưu `EXECUTION_REPORT.md`, test logs, JSON/WAV theo run ID. P1 biến thể `14h`, giờ chữ Hàn, `độ C/F`, nhãn ZIP chỉ bắt đầu sau các P0 này, không trộn thành một patch lớn.

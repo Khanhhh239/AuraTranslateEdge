@@ -19,19 +19,23 @@
 **Files:** `s2s_edge/s2s_edge/audio.py`, `backends.py`, `pipeline.py`, `conversation.py` (call sites), `tools/run_e2e.py`, `tools/s2s_web.py`, `tools/start_s2s_web.py`; thêm `tests/test_runtime_profiles.py`.
 **Interface:** `get_vad_options(profile: str) -> dict`; không đổi giá trị caller truyền rõ. Legacy: pad=150 ms, silence=500 ms, merge_gap=1.5 s, short=3.0 s; upstream: 120/320/0.32/1.1. Default an toàn tạm thời legacy; upstream opt-in. ORT `basic` vẫn có retry disable khi optimizer lỗi; `auto` tương ứng chính sách upstream >200 MB/external-data. Ghi policy và attempt thực, không chỉ ý định cấu hình.
 
-- [ ] Regression trước: effective profile giống nhau ở CLI/web và batch/stream; launcher phải tôn trọng env caller đặt 0, không ép source mode=1.
-- [ ] Profile đi qua cùng một chỗ resolve; không để một số call site vẫn dùng defaults khác. Health/result ghi profile, source mode và fingerprint, không thay nhãn UI bằng phỏng đoán.
-- [ ] Test caller override, invalid profile báo rõ, ORT fallback và không tự sửa option đã chọn. `python -m unittest discover -s tests -p test_runtime_profiles.py -v`.
-- [ ] Trên cùng WAV regression EN, VAD legacy phải giữ span ZIP đầy đủ; thêm ca pause nằm giữa chữ số, sát câu và chuỗi dài. Đánh giá kết quả ASR thực, không chỉ assert số đoạn. Không thêm heuristic cho giá trị 67297.
+- [x] Regression trước: effective profile giống nhau ở CLI/web và batch/stream; launcher phải tôn trọng env caller đặt 0, không ép source mode=1; hỗ trợ `--models` & `--backend {cpu,npu}`, mặc định `source_mode=0` trên Linux/NPU (và keep-loaded cho NPU), fail tường minh nếu spawned/foreign PID mismatch (REVIEW_ROUND2 P2).
+- [x] Profile đi qua cùng một chỗ resolve; không để một số call site vẫn dùng defaults khác. Health/result ghi profile, source mode, execution backend/models và fingerprint, không thay nhãn UI bằng phỏng đoán.
+- [x] Test caller override, invalid profile báo rõ, ORT fallback, spawn race/foreign PID (REVIEW_ROUND2 P2) và không tự sửa option đã chọn. `python -m unittest discover -s tests -p "test_*.py"`.
+- [x] Trên cùng WAV regression EN, VAD legacy phải giữ span ZIP đầy đủ; thêm ca pause nằm giữa chữ số, sát câu và chuỗi dài. Đánh giá kết quả ASR thực, không chỉ assert số đoạn. Không thêm heuristic cho giá trị 67297.
 
 **Đạt:** chưa promote VAD upstream mặc định; có thể tái lập mỗi nhánh mà không sửa source thủ công. Khi chỉ containment VAD, giữ ORT policy hiện tại và ghi nó; basic/disable/auto là các biến ablation riêng, không đổi đồng thời rồi quy nguyên nhân cho VAD. Không tự đổi lựa chọn neural-source của người dùng; chỉ bỏ việc launcher ghi đè và ghi nhận nó.
 
-## T3 - Ablation và quyết định
+## T3 - Ablation trên Host & Cổng sẵn sàng AIBOX 8550 (T4)
 
-- [ ] Chọn fixture có nhãn từ dữ liệu sẵn có và freeze split; tách rõ audio tổng hợp với audio người thật. Dev minimum 3 clip/language nếu có; thiếu dữ liệu ghi thiếu, không lấy giọng tổng hợp gọi là native holdout.
-- [ ] Đo VAD legacy/upstream với ORT cố định; đo ORT basic/disable/auto trên graph liên quan khi VAD cố định. Chỉ hai cấu hình tốt nhất mới chạy lại S2S sáu chiều; tránh toàn bộ factorial đắt tiền khi chưa cần.
-- [ ] Load/cold tách warm; ít nhất 1 warm-up và 3 lượt paired, đảo thứ tự profile bằng seed. Báo stage time/segment count, median và sample count; p95 tập nhỏ chỉ mô tả. Giữ cùng graph/threads/device và không chạy hai inference job cùng lúc.
-- [ ] Test HTTP thật ít nhất VI→EN và EN→VI với mode mà web sẽ dùng; source mode còn lại có integration check riêng, không dùng kết quả thay thế nhau. Metal không có thì đánh dấu mode=1 chưa kiểm, không silently chuyển 0.
-- [ ] Áp gate SPEC: không regression mã ở fixture đã xác nhận; chỉ promote upstream nếu có lợi numeric/quality được xác minh và chấp nhận latency. Nếu không, giữ legacy và báo kết luận không tăng chất lượng.
+- [x] Chọn fixture có nhãn từ dữ liệu sẵn có và freeze split; tách rõ audio tổng hợp với audio người thật. Dev minimum 3 clip/language nếu có; thiếu dữ liệu ghi thiếu, không lấy giọng tổng hợp gọi là native holdout.
+- [x] Đo VAD legacy/upstream với ORT cố định; đo ORT basic/disable/auto trên graph liên quan khi VAD cố định. Chỉ hai cấu hình tốt nhất mới chạy lại S2S sáu chiều; tránh toàn bộ factorial đắt tiền khi chưa cần.
+- [x] Load/cold tách warm; ít nhất 1 warm-up và 3 lượt paired, đảo thứ tự profile bằng seed. Báo stage time/segment count, median và sample count; p95 tập nhỏ chỉ mô tả. Giữ cùng graph/threads/device và không chạy hai inference job cùng lúc.
+- [x] Test HTTP thật ít nhất VI→EN và EN→VI với mode mà web sẽ dùng; source mode còn lại có integration check riêng (`mode=0` mặc định AIBOX/Linux, `mode=1` chỉ đối chứng Metal trên macOS), không dùng kết quả thay thế nhau. Metal không có thì fail tường minh nếu ép `1`, không silently chuyển `0`.
+- [x] Áp gate SPEC: không regression mã ở fixture đã xác nhận; chỉ promote upstream nếu có lợi numeric/quality được xác minh và chấp nhận latency. Hiện giữ `vad_profile=legacy` và `ort_policy=auto` làm mặc định global.
+- [ ] **Cổng thiết bị AIBOX 8550 (trên phần cứng thật / offline `linux/aarch64`):**
+  - Đóng gói bằng `s2s_edge/tools/build_package.py` kèm `assets/identifier.crfsuite` và kiểm `check_wheelhouse()` cho `wheelhouse/` (py312) / `wheelhouse_cp310/` (py310) trước khi chép lên hộp (`numpy`, `scipy`, `soundfile`, `sentencepiece`, `kaldi-native-fbank`, `onnxruntime`, `psutil`, `qai_appbuilder`; optional wheels không chặn `install.sh`).
+  - Trên AIBOX 8550: chạy `bash tools/session0.sh` (`recon.sh`, `golden.py`, smoke, NPU benchmark trên `models_qcs8550`), `bash tools/runbook.sh` (`A0–A6`: `live_selftest.py`, `audio_check.sh` ALSA, `thermal_soak.py`, `eval_btc.py`) và test HTTP `start_s2s_web.py --backend npu --models ... --source-mode 0`.
+  - Lưu ý: các node mới từ nhánh `asr-speed-accuracy` chưa biên dịch QNN `.bin` (`_sv_frontend`, `asr_vi_decoder/joiner`, bucket `@w*`) giữ cho host/P2 AI Hub compile riêng; không đòi hỏi trên A0–A6.
 
-**Output:** `EXECUTION_REPORT.md`, manifest, unit log, ablation JSON và sample WAV. Trạng thái audio nghe chưa xác nhận phải để riêng. Mỗi task có diff độc lập, không tự push/merge.
+**Output:** `EXECUTION_REPORT.md`, manifest, unit log, ablation JSON và sample WAV. Trạng thái audio nghe chưa xác nhận và kiểm thử trên chip QCS8550 thật phải tách riêng rõ ràng. Mỗi task có diff độc lập, không tự push/merge.

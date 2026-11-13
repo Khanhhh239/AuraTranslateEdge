@@ -4,7 +4,7 @@
 import hashlib, json, os, subprocess
 from .audio import resolve_vad_options
 from .backends import make_graph, resolve_ort_policy
-from .asr import AsrVi, AsrXx
+from .asr import AsrVi, AsrXx, Transducer, load_cmvn
 from .mt import Nllb
 from .tts import TtsVi, TtsZh, TtsEnKo
 
@@ -122,16 +122,97 @@ class Registry:
     def graph_telemetry(self):
         return {k: g.ort_info() for k, g in self._cache.items() if hasattr(g, "ort_info")}
 
+    def windows(self, base, default):
+        """Sorted static window buckets [(T, key), ...] from `base` (default T) and `base@<T>` entries in models.json."""
+        out = []
+        if base in self.cfg:
+            out.append((int(self.cfg[base].get("window", default)), base))
+        prefix = base + "@"
+        for k in self.cfg:
+            if k.startswith(prefix):
+                try:
+                    out.append((int(k[len(prefix):]), k))
+                except ValueError:
+                    pass
+        out.sort(key=lambda x: x[0])
+        return out
+
+    def sv_frontend(self):
+        """Choose SenseVoice frontend: 'host' (kaldi_native_fbank + CMVN) or 'graph' (sv_frontend ONNX/QNN)."""
+        env = os.environ.get("S2S_SV_FRONTEND", "").strip().lower()
+        if env in ("host", "graph"):
+            return env
+        cfg_v = str(self.cfg.get("_sv_frontend", "")).strip().lower()
+        if cfg_v in ("host", "graph"):
+            return cfg_v
+        return "graph" if "asr_xx_frontend" in self.cfg else "host"
+
+    def transducer(self):
+        """Return Zipformer RNN-T decoder/joiner when configured and not disabled via S2S_VI_DECODE=ctc."""
+        if os.environ.get("S2S_VI_DECODE", "").strip().lower() == "ctc":
+            return None
+        if getattr(self, "_rnnt_loaded", False):
+            return self._rnnt_obj
+        self._rnnt_loaded = True
+        self._rnnt_obj = None
+        if "asr_vi_decoder" in self.cfg and "asr_vi_joiner" in self.cfg:
+            dec = self._path("asr_vi_decoder", "onnx")
+            joi = self._path("asr_vi_joiner", "onnx")
+            if dec and joi:
+                self._rnnt_obj = Transducer(dec, joi)
+        return self._rnnt_obj
+
+    def _path(self, key, ext):
+        spec = self.cfg.get(key)
+        if not isinstance(spec, dict) or ext not in spec:
+            return None
+        return os.path.join(self.dir, spec[ext])
+
+    def asr_keys(self, lang):
+        """Compiled graph keys required for `lang`, including all window buckets."""
+        if lang == "vi":
+            keys = [k for _, k in self.windows("asr_vi", 1500)]
+            return keys or (["asr_vi"] if "asr_vi" in self.cfg else [])
+        if "asr_xx" in self.cfg:
+            return ["asr_xx"]
+        keys = [k for _, k in self.windows("asr_xx_encoder", 500)]
+        if not keys and "asr_xx_encoder" in self.cfg:
+            keys = ["asr_xx_encoder"]
+        if self.sv_frontend() == "graph" and "asr_xx_frontend" in self.cfg:
+            keys = ["asr_xx_frontend"] + keys
+        return keys
+
     def files(self, keys):
+        """Unique model artifact paths for `keys` (deduplicates shared multi-graph QNN context binaries)."""
         ext = "onnx" if self.backend == "cpu" else "ctx"
-        return [os.path.join(self.dir, self.cfg[k][ext]) for k in keys]
+        all_keys = list(keys)
+        if "asr_vi" in all_keys or any(k.startswith("asr_vi@") for k in all_keys):
+            for k in ("asr_vi_decoder", "asr_vi_joiner"):
+                if k in self.cfg and k not in all_keys:
+                    all_keys.append(k)
+        seen = set(); out = []
+        for k in all_keys:
+            kind = "onnx" if k in ("asr_vi_decoder", "asr_vi_joiner") else ext
+            p = self._path(k, kind)
+            if not p:
+                continue
+            ap = os.path.abspath(p)
+            if ap not in seen:
+                seen.add(ap); out.append(p)
+        return out
 
     def asr(self, lang):
         if lang == "vi":
             known = set(open(os.path.join(ASSETS, "piper_vi_words.txt"), encoding="utf-8").read().splitlines())
-            return AsrVi(self.graph("asr_vi"), os.path.join(ASSETS, "zipformer_bpe.model"), known)
+            ws = self.windows("asr_vi", 1500)
+            enc = [(w, self.graph(k)) for w, k in ws] if len(ws) > 1 else self.graph(ws[0][1] if ws else "asr_vi")
+            return AsrVi(enc, os.path.join(ASSETS, "zipformer_bpe.model"), known, transducer=self.transducer())
         if "asr_xx" in self.cfg: return AsrXx(self.graph("asr_xx"), None, lang)
-        return AsrXx(self.graph("asr_xx_frontend"), self.graph("asr_xx_encoder"), lang)
+        ws = self.windows("asr_xx_encoder", 500)
+        enc = [(w, self.graph(k)) for w, k in ws] if len(ws) > 1 else self.graph(ws[0][1] if ws else "asr_xx_encoder")
+        if self.sv_frontend() == "host":
+            return AsrXx(None, enc, lang, cmvn=load_cmvn(os.path.join(ASSETS, "sensevoice_am.mvn")))
+        return AsrXx(self.graph("asr_xx_frontend"), enc, lang)
 
     def release(self, key):
         """Drop a graph from the cache and free its runtime memory (MT fallback after an OOM / runtime error)."""
@@ -195,6 +276,12 @@ class Registry:
                 log(f"  warmup {k}: load {t1 - t0:.1f} s" + ("" if run_s is None else f", first run {run_s * 1000:.0f} ms"))
             except Exception as e:
                 log(f"  warmup {k}: FAILED {repr(e)[:200]}")
+        for s in sorted({s for s, _ in directions}):
+            try:
+                a = self.asr(s)
+                if hasattr(a, "warmup"): a.warmup()
+            except Exception:
+                pass
         if any(s == "vi" for s, _ in directions):                         # Vietnamese punctuation/casing model (CPU), see conversation.restore_vi
             from .conversation import VI_PUNCT_MODE
             if VI_PUNCT_MODE == "model":
@@ -206,7 +293,7 @@ class Registry:
         return out
 
     def components_for(self, src, tgt):
-        asr = ["asr_vi"] if src == "vi" else (["asr_xx"] if "asr_xx" in self.cfg else ["asr_xx_frontend", "asr_xx_encoder"])
+        asr = self.asr_keys(src)
         if "mt" in self.cfg: mt = ["mt"]
         else:
             if getattr(self, "mt_active", None) is None: self.mt()            # build (probe + fallback) before anyone loads the biggest beam graph directly

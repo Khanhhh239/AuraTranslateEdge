@@ -6,14 +6,15 @@ Language identification per utterance (cheap, no extra model):
  1. the Vietnamese CTC model always runs first (it is the cheapest ASR): high confidence and mostly valid Vietnamese words  =>  Vietnamese;
  2. otherwise, with one candidate left that language is used; with several (auto mode) SenseVoice runs in `auto` language mode and the script of its
     text decides (Hangul -> ko, Han -> zh, Latin -> en)."""
-import re
+import bisect, os, re, time
 import numpy as np
-from .audio import SR, segment, normalize_level
+from .audio import SR, effective_max_s, segment, normalize_level
 from .asr import AsrXx
 from .names import NameTransliterator
+from .numeric_guard import audit_target_entities, extract_known_numeric_spans, guard_source_numeric_changes
+from .source_segmentation import split_preserving_spans
 from .textnorm import vi_punct
 from . import neural_textnorm
-import os, time
 
 # Punctuation/casing for the Vietnamese ASR text (Zipformer outputs lower case, no punctuation) before MT:
 #   S2S_VI_PUNCT=model : (default) vibert-capu int8 on the CPU (s2s_edge/punct_vi.py), falls back to the rule when assets/vi_capu is missing.
@@ -24,13 +25,85 @@ VI_PUNCT_MODE = os.environ.get("S2S_VI_PUNCT", "model").lower()
 VI_PUNCT = VI_PUNCT_MODE != "0"
 
 
-def restore_vi(text):
+def _break_positions(breaks, word_ends, frame_s=0.04):
+    """Map audio pause sample offsets to 1-indexed word boundary positions via ASR word end frames."""
+    if not breaks or not word_ends:
+        return []
+    times = [f * frame_s for f in word_ends]
+    out = []
+    for b in breaks:
+        k = bisect.bisect_right(times, b / SR)
+        if 0 < k < len(word_ends):
+            out.append(k)
+    return sorted(set(out))
+
+
+def _align_breaks(src_words, dst_words, breaks):
+    """Transfer 1-indexed word break positions from `src_words` to `dst_words` across text rewrites."""
+    if not breaks or not src_words or not dst_words:
+        return []
+    if len(src_words) == len(dst_words):
+        return list(breaks)
+    import difflib
+    s_norm = [re.sub(r"[^\w]+", "", w.lower()) for w in src_words]
+    d_norm = [re.sub(r"[^\w]+", "", w.lower()) for w in dst_words]
+    sm = difflib.SequenceMatcher(None, s_norm, d_norm, autojunk=False)
+    out = []
+    for k in breaks:
+        if k <= 0 or k > len(src_words):
+            continue
+        mapped = None
+        for tag, i1, i2, j1, j2 in sm.get_opcodes():
+            if i1 < k <= i2:
+                if tag == "equal":
+                    mapped = j1 + (k - i1)
+                elif j2 > j1:
+                    mapped = min(j2, max(j1 + 1, j1 + round((k - i1) * (j2 - j1) / max(1, i2 - i1))))
+                else:
+                    mapped = j1
+                break
+        if mapped is not None and 0 < mapped < len(dst_words):
+            out.append(mapped)
+    return sorted(set(out))
+
+
+def restore_vi(text, breaks=None):
+    restore_vi.last_validation = None
+    src_words = text.split()
+    m = None
+    out = None
     if VI_PUNCT_MODE == "model":
         from .punct_vi import get
         from .registry import ASSETS
         m = get(ASSETS)
-        if m is not None: return vi_punct(m(text))
-    return vi_punct(text)
+        if m is not None:
+            restored = m(text)
+            wb = _align_breaks(src_words, restored.split(), breaks) if breaks else None
+            out = vi_punct(restored, breaks=wb)
+    if out is None:
+        out = vi_punct(text, breaks=breaks)
+
+    report = guard_source_numeric_changes(text, out, "vi")
+    capu_val = getattr(m, "last_validation", None) if m is not None else None
+    if capu_val is not None and capu_val.warnings:
+        report.warnings.extend(capu_val.warnings)
+    if report.status == "invalid":
+        fallback = vi_punct(text, breaks=breaks)
+        fb_report = guard_source_numeric_changes(text, fallback, "vi")
+        if fb_report.status == "invalid":
+            fallback = text
+            fb_report = guard_source_numeric_changes(text, fallback, "vi")
+            fb_report.fallback_policy = "fallback_to_raw_source"
+        else:
+            fb_report.fallback_policy = "fallback_to_vi_punct"
+        fb_report.warnings.append({"code": "restore_vi_rejected", "issues": list(report.issues)})
+        restore_vi.last_validation = fb_report
+        return fallback
+    restore_vi.last_validation = report
+    return out
+
+
+restore_vi.last_validation = None
 
 HANGUL = re.compile(r"[가-힣ᄀ-ᇿ]"); HAN = re.compile(r"[一-鿿]"); LATIN = re.compile(r"[A-Za-z]")
 
@@ -53,6 +126,7 @@ class Engine:
             self.source_mode = str(prof["source_mode"])
         else:
             self.source_mode = None
+        self.last_source_guard = None
 
     def prep(self, wav):
         """Level normalisation (+ optional GTCRN speech enhancement on the CPU) before ASR."""
@@ -89,27 +163,92 @@ class Engine:
             return str(self.r.source_mode) == "1"
         return neural_textnorm.enabled()
 
-    def prepare_text(self, text, src):
-        if text and src in ("vi", "en") and self.neural_enabled():
-            parts = neural_textnorm.get().prepare_source(text, src, self.mt.S - 2, self.mt.encode)
-            return " ".join(parts), parts
-        return (restore_vi(text) if src == "vi" and text and VI_PUNCT else text), None
+    def _mt_budget(self):
+        mt_obj = self._mt
+        if mt_obj is None:
+            try:
+                mt_obj = self.mt
+            except Exception:
+                return None, None
+        if hasattr(mt_obj, "S") and hasattr(mt_obj, "encode") and hasattr(mt_obj, "translate_atomic"):
+            return int(mt_obj.S) - 2, mt_obj.encode
+        return None, None
+
+    def prepare_text(self, text, src, breaks=None):
+        self.last_source_guard = None
+        if not text:
+            return text, None
+        if src in ("vi", "en") and self.neural_enabled():
+            norm = neural_textnorm.get()
+            parts = norm.prepare_source(text, src, self.mt.S - 2, self.mt.encode)
+            joined = " ".join(parts)
+            report = guard_source_numeric_changes(text, joined, src)
+            if report.status == "invalid":
+                fallback_parts = split_sentences(text, src, token_limit=self.mt.S - 2, encode=self.mt.encode)
+                fb_report = guard_source_numeric_changes(text, " ".join(fallback_parts), src)
+                fb_report.fallback_policy = "fallback_to_raw_source"
+                fb_report.warnings.append({"code": "neural_source_rejected", "issues": list(report.issues)})
+                self.last_source_guard = fb_report.to_dict()
+                return " ".join(fallback_parts), fallback_parts
+            self.last_source_guard = report.to_dict()
+            return joined, parts
+
+        prepared_text = restore_vi(text, breaks=breaks) if src == "vi" and VI_PUNCT else text
+        report = guard_source_numeric_changes(text, prepared_text, src)
+        if src == "vi" and VI_PUNCT and getattr(restore_vi, "last_validation", None) is not None:
+            for w in restore_vi.last_validation.warnings:
+                if w not in report.warnings:
+                    report.warnings.append(w)
+            if report.fallback_policy is None:
+                report.fallback_policy = restore_vi.last_validation.fallback_policy
+        if report.status == "invalid":
+            fb_report = guard_source_numeric_changes(text, text, src)
+            fb_report.fallback_policy = "fallback_to_raw_source"
+            fb_report.warnings.append({"code": "edge_source_prep_rejected", "issues": list(report.issues)})
+            prepared_text = text
+            report = fb_report
+        self.last_source_guard = report.to_dict()
+
+        token_limit, encode = self._mt_budget()
+        if token_limit is not None and encode is not None:
+            spans = extract_known_numeric_spans(prepared_text, src)
+            parts = split_preserving_spans(
+                prepared_text,
+                spans,
+                token_limit=token_limit,
+                encode=encode,
+                lang=src,
+                merge_small=True,
+            )
+            return prepared_text, parts
+        return prepared_text, None
+
+    def _run_asr(self, wav, src, text=None, breaks=None):
+        asr_obj = self.asr(src)
+        if text is None:
+            text = asr_obj(wav)
+        raw_words = text.split()
+        word_ends = getattr(asr_obj, "last", {}).get("word_ends", ()) if hasattr(asr_obj, "last") else ()
+        wb = _break_positions(breaks, word_ends) if (breaks and src == "vi" and word_ends) else []
+        for pat, rep in (self.r.glossary.get("_asr_fix", {}).get(src, {}) or {}).items():  # domain fixes: how the ASR (mis)spells a term -> the term
+            text = re.sub(pat, rep, text, flags=re.IGNORECASE)
+        if wb:
+            wb = _align_breaks(raw_words, text.split(), wb)
+        return text, wb
 
     def translate_text(self, text, src, tgt, parts=None):
         if not text.strip(): return ""
         if parts is None: return self.mt(text, src, tgt)
         return ("" if tgt == "zh" else " ").join(self.mt.translate_atomic(p, src, tgt) for p in parts)
 
-    def translate_segment(self, wav, src, tgt, text=None, prepped=False):
+    def translate_segment(self, wav, src, tgt, text=None, prepped=False, breaks=None):
         """text: pre-computed ASR text (language identification already ran the ASR)."""
         wav = wav if prepped else self.prep(wav); gr = self.graphs_for(src, tgt); g0, c0 = self.gtime(gr); t = {}; a = time.perf_counter()
-        if text is None: text = self.asr(src)(wav)
-        for pat, rep in (self.r.glossary.get("_asr_fix", {}).get(src, {}) or {}).items():      # domain fixes: how the ASR (mis)spells a term -> the term
-            text = re.sub(pat, rep, text, flags=re.IGNORECASE)
+        text, wb = self._run_asr(wav, src, text=text, breaks=breaks)
         b = time.perf_counter(); t["asr_s"] = b - a
         if len(re.sub(r"[\W_]+", "", text)) < 2: text = ""                                 # nothing intelligible (noise, breath, a lone "I.")
         asr_text = text
-        text, prepared = self.prepare_text(text, src)
+        text, prepared = self.prepare_text(text, src, breaks=wb or None)
         t["source_normalize_s"] = time.perf_counter() - b
         mt_text = self.translate_text(text, src, tgt, prepared)
         if tgt in ("zh", "ko") and mt_text: mt_text = self.names(mt_text, tgt)
@@ -117,19 +256,30 @@ class Engine:
         out, sr = tts.synthesize(mt_text) if mt_text.strip() else (np.zeros(0, np.float32), tts.sr); d = time.perf_counter(); t["tts_s"] = d - c
         g1, c1 = self.gtime(gr); t["total_s"] = d - a; t["graph_s"] = g1 - g0; t["graph_calls"] = c1 - c0; t["host_s"] = t["total_s"] - t["graph_s"]
         t["audio_in_s"] = len(wav) / SR; t["audio_out_s"] = len(out) / sr
-        return dict(src=src, tgt=tgt, asr=text, asr_before_normalization=asr_text, mt=mt_text, tts_text=getattr(tts, "tts_input_text", mt_text) if mt_text.strip() else '', tts_format=getattr(tts, 'format_trace', {}) if mt_text.strip() else {}, wav=out, sr=sr, timing=t)
+        source_entities = extract_known_numeric_spans(text, src) if text else []
+        target_audit = audit_target_entities(source_entities, mt_text, tgt, src_lang=src) if source_entities or mt_text else {
+            "preserved": [], "mismatch": [], "unverifiable": [], "items": [],
+            "counts": {"total": 0, "preserved": 0, "mismatch": 0, "unverifiable": 0}, "target_spans": [],
+        }
+        return dict(
+            src=src, tgt=tgt, asr=text, asr_before_normalization=asr_text, mt=mt_text,
+            tts_text=getattr(tts, "tts_input_text", mt_text) if mt_text.strip() else '',
+            tts_format=getattr(tts, 'format_trace', {}) if mt_text.strip() else {},
+            source_guard=dict(self.last_source_guard or {}),
+            target_audit=target_audit,
+            wav=out, sr=sr, timing=t,
+        )
 
-    def translate_segment_stream(self, wav, src, tgt, text=None, prepped=False):
+    def translate_segment_stream(self, wav, src, tgt, text=None, prepped=False, breaks=None):
         """Pipelined version for live output: ASR once, split the (punctuated) transcript into sentences, then MT + TTS sentence by sentence and
         yield each result as soon as its audio is ready, so playback of sentence 1 overlaps MT/TTS of sentence 2 (the NPU runs graphs one at a
         time, so this saves waiting time, not compute). Same fields as translate_segment, plus "part" = (index, count)."""
         wav = wav if prepped else self.prep(wav); gr = self.graphs_for(src, tgt); a = time.perf_counter()
-        if text is None: text = self.asr(src)(wav)
-        for pat, rep in (self.r.glossary.get("_asr_fix", {}).get(src, {}) or {}).items():
-            text = re.sub(pat, rep, text, flags=re.IGNORECASE)
+        text, wb = self._run_asr(wav, src, text=text, breaks=breaks)
         asr_s = time.perf_counter() - a
         if len(re.sub(r"[\W_]+", "", text)) < 2: return
-        text, prepared = self.prepare_text(text, src)
+        asr_text = text
+        text, prepared = self.prepare_text(text, src, breaks=wb or None)
         parts = prepared if prepared is not None else split_sentences(text, src); tts = self.tts(tgt)
         for i, sent in enumerate(parts):
             g0, c0 = self.gtime(gr); b = time.perf_counter()
@@ -138,22 +288,34 @@ class Engine:
             c = time.perf_counter(); out, sr = tts.synthesize(mt_text) if mt_text.strip() else (np.zeros(0, np.float32), tts.sr); d = time.perf_counter()
             g1, c1 = self.gtime(gr); t = dict(asr_s=asr_s if i == 0 else 0.0, mt_s=c - b, tts_s=d - c, total_s=(d - a) if i == 0 else (d - b), graph_s=g1 - g0, graph_calls=c1 - c0)
             t["host_s"] = t["total_s"] - t["graph_s"]; t["audio_in_s"] = len(wav) / SR if i == 0 else 0.0; t["audio_out_s"] = len(out) / sr
-            yield dict(src=src, tgt=tgt, asr=sent, mt=mt_text, tts_text=getattr(tts, 'tts_input_text', mt_text) if mt_text.strip() else '', tts_format=getattr(tts, 'format_trace', {}) if mt_text.strip() else {}, wav=out, sr=sr, timing=t, part=(i, len(parts)))
+            source_entities = extract_known_numeric_spans(sent, src) if sent else []
+            target_audit = audit_target_entities(source_entities, mt_text, tgt, src_lang=src) if source_entities or mt_text else {
+                "preserved": [], "mismatch": [], "unverifiable": [], "items": [],
+                "counts": {"total": 0, "preserved": 0, "mismatch": 0, "unverifiable": 0}, "target_spans": [],
+            }
+            yield dict(
+                src=src, tgt=tgt, asr=sent, asr_before_normalization=asr_text if i == 0 else sent, mt=mt_text,
+                tts_text=getattr(tts, 'tts_input_text', mt_text) if mt_text.strip() else '',
+                tts_format=getattr(tts, 'format_trace', {}) if mt_text.strip() else {},
+                source_guard=dict(self.last_source_guard or {}),
+                target_audit=target_audit,
+                wav=out, sr=sr, timing=t, part=(i, len(parts)),
+            )
 
 
 _SENT = re.compile(r"(?<=[\.\!\?。！？])\s+|(?<=[。！？])")
 
 
-def split_sentences(text, lang):
-    """Sentences of a punctuated transcript (vibert-capu output for vi, SenseVoice for en/zh/ko). Pieces of < 2 words (< 3 chars for zh/ko,
-    e.g. a lone 'Vâng.') are merged into the neighbour so MT never gets a fragment out of context."""
-    parts = [p.strip() for p in _SENT.split(text.strip()) if p and p.strip()]
-    small = (lambda p: len(re.sub(r"\W", "", p)) < 3) if lang in ("zh", "ko") else (lambda p: len(p.split()) < 2)
-    out = []
-    for p in parts:
-        if out and (small(p) or small(out[-1])): out[-1] = (out[-1] + ("" if lang in ("zh",) else " ") + p).strip()
-        else: out.append(p)
-    return out or [text]
+def split_sentences(text, lang, *, token_limit=None, encode=None):
+    """Sentences of a punctuated transcript (vibert-capu output for vi, SenseVoice for en/zh/ko).
+    Preserves all protected numeric/identifier spans and merges tiny fragments (<2 words / <3 CJK chars) within token_limit."""
+    if not text or not text.strip():
+        return [text] if text else []
+    spans = extract_known_numeric_spans(text, lang)
+    limit = int(token_limit) if token_limit is not None else 10**9
+    enc = encode if encode is not None else (lambda s: [0] * max(1, len(s)))
+    parts = split_preserving_spans(text, spans, token_limit=limit, encode=enc, lang=lang, merge_small=True)
+    return parts or [text]
 
 
 class LanguageID:
@@ -163,7 +325,9 @@ class LanguageID:
     def __init__(self, engine, model_path=None, bias=0.0):
         import json, os
         from .registry import ASSETS
-        self.e = engine; self.bias = bias; self.m = json.load(open(model_path or os.path.join(ASSETS, "lid_vi.json"), encoding="utf-8"))
+        self.e = engine; self.bias = bias
+        with open(model_path or os.path.join(ASSETS, "lid_vi.json"), encoding="utf-8") as f:
+            self.m = json.load(f)
 
     def vi_prob(self, st):
         x = np.array([st["conf_nb"], st["known"], st["nb_ratio"], st.get("conf_all", st["conf_nb"]), st.get("blank_p", 1 - st["nb_ratio"]), min(st["nwords"], 30) / 30.0])
@@ -198,22 +362,33 @@ class Conversation:
         if self.auto and text and len(re.sub(r"[\W_]+", "", text)) >= 3: self.partner = src       # junk fragments must not change the partner language
         return src, "vi", text, st
 
-    def translate(self, wav, max_seg_s=12.0, vad_profile=None):
+    def _segments(self, wav, max_seg_s=None, vad_profile=None):
         from .registry import resolve_runtime_profile
         prof = resolve_runtime_profile(vad_profile=vad_profile if vad_profile is not None else self.vad_profile)["vad_profile"]
+        asr_max = max((getattr(e, "max_s", 12.0) for e in getattr(self.e, "_asr", {}).values()), default=12.0)
+        max_s = effective_max_s(asr_max, vad_profile=prof, max_seg_s=max_seg_s)
+        res = segment(wav, max_s=max_s, vad_profile=prof, join_gap_s=0.0, return_breaks=True)
+        if isinstance(res, tuple):
+            return res
+        return res, [[] for _ in res]
+
+    def translate(self, wav, max_seg_s=None, vad_profile=None):
+        spans, brs = self._segments(wav, max_seg_s=max_seg_s, vad_profile=vad_profile)
         out = []
-        for a, b in segment(wav, max_s=max_seg_s, vad_profile=prof):
-            seg = self.e.prep(wav[a:b]); src, tgt, text, st = self.route(seg); r = self.e.translate_segment(seg, src, tgt, text=text, prepped=True)
+        for (a, b), br in zip(spans, brs):
+            seg = self.e.prep(wav[a:b]); src, tgt, text, st = self.route(seg)
+            kw = {"breaks": br} if br else {}
+            r = self.e.translate_segment(seg, src, tgt, text=text, prepped=True, **kw)
             r["span"] = (a / SR, b / SR); r["lid"] = st
             if r["mt"]: out.append(r)
         return out
 
-    def translate_stream(self, wav, max_seg_s=12.0, vad_profile=None):
+    def translate_stream(self, wav, max_seg_s=None, vad_profile=None):
         """Generator: one result per sentence as soon as its audio is ready (see Engine.translate_segment_stream)."""
-        from .registry import resolve_runtime_profile
-        prof = resolve_runtime_profile(vad_profile=vad_profile if vad_profile is not None else self.vad_profile)["vad_profile"]
-        for a, b in segment(wav, max_s=max_seg_s, vad_profile=prof):
+        spans, brs = self._segments(wav, max_seg_s=max_seg_s, vad_profile=vad_profile)
+        for (a, b), br in zip(spans, brs):
             seg = self.e.prep(wav[a:b]); src, tgt, text, st = self.route(seg)
-            for r in self.e.translate_segment_stream(seg, src, tgt, text=text, prepped=True):
+            kw = {"breaks": br} if br else {}
+            for r in self.e.translate_segment_stream(seg, src, tgt, text=text, prepped=True, **kw):
                 r["span"] = (a / SR, b / SR); r["lid"] = st
                 if r["mt"]: yield r

@@ -83,7 +83,9 @@ def _syllables(phones):
 class VietnameseNames:
     def __init__(self, cmudict_path=None, known_syllables=None):
         self.cmu = {}
-        if cmudict_path and os.path.exists(cmudict_path): self.cmu = json.load(open(cmudict_path, encoding="utf-8"))
+        if cmudict_path and os.path.exists(cmudict_path):
+            with open(cmudict_path, encoding="utf-8") as f:
+                self.cmu = json.load(f)
         self.known = {_fold(k) for k in known_syllables} if known_syllables is not None else None
 
     def word(self, w):

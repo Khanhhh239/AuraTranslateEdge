@@ -11,7 +11,12 @@ Executor là Antigravity. Codex lập kế hoạch/review; người dùng nghe x
 ## Ràng buộc chung
 
 - Giữ graph/weights và dataset cố định trong một so sánh; đổi một biến mỗi ablation.
-- VI/EN/KO/ZH; Python 3.11 hiện được dùng. Không thêm dependency/model lớn nếu chưa có kế hoạch riêng.
+- VI/EN/KO/ZH; code trong `s2s_edge/` **phải tương thích Python ≥3.10**: Host dev hiện dùng Python 3.11 (macOS arm64), còn thiết bị **HSPTEK AIBOX 8550** (`linux/aarch64`, QCS8550 Hexagon v73, offline, 12–16 GB RAM, 128 GB UFS) dùng Python 3.10 (`wheelhouse_cp310`) hoặc Python 3.12 (`wheelhouse`) với `QAIRT 2.51` (`qai_appbuilder 2.51.40`) hoặc container `docker_run.sh`.
+- **Tương thích offline & ngân sách phần cứng AIBOX 8550:**
+  - `s2s_edge/requirements.txt` chỉ giữ các dependency cốt lõi có wheel `linux_aarch64` (`numpy`, `scipy`, `soundfile`, `sentencepiece`, `kaldi-native-fbank`, `onnxruntime`, `psutil`); mọi gói tùy chọn (`python-crfsuite`, `openpyxl`, `sounddevice`, `jiwer`, `sacrebleu`) phải có đường chạy fallback trong `install.sh` và runtime.
+  - **`source_mode=0` (`S2S_NEURAL_TN=0`) + `tts_format=hybrid` là đường chạy mặc định và bắt buộc khả thi trên AIBOX 8550** (không dùng `Qwen3-4B MLX4`, `ByT5`, `NeMo`, Apple Metal hay PyTorch MPS trong runtime thiết bị). Nếu caller yêu cầu tường minh `S2S_NEURAL_TN=1` trên Linux/NPU thiếu Metal, hệ thống phải fail rõ lỗi, không âm thầm fallback sang `0`.
+  - Mọi cải thiện Plan 02/03 trên đường chạy sản phẩm phải dùng Python/stdlib + ONNX nhỏ gọn hiện có (`vibert_capu_int8` + tùy chọn `identifier.crfsuite`), giữ tổng RAM thiết bị trong ngưỡng <6 GB và không thêm dependency/model lớn ngoài kế hoạch riêng.
+  - Khi chạy web/server với `--backend npu` (`QCS8550`), giữ `Registry`/QNN binaries resident (`keep_loaded=True`) theo hàng đợi tuần tự 1 worker để tránh cold reload ~2.2 GB/lượt, nhưng vẫn gắn fingerprint và `effective_profile`.
 - Không lấy transcript tham chiếu thay đầu vào ASR; không tự suy ra 32 khi ASR trả 2.
 - Mã giữ chữ số, thứ tự, số 0 đầu và dấu theo policy đã công bố. Canonical bỏ grouping phải có mapping với raw, không gọi đó là byte-identical.
 - Dấu âm, thập phân, loại dữ liệu, đơn vị và meridiem là ngữ nghĩa; chỉ giữ dãy chữ số không đủ.
@@ -32,4 +37,4 @@ Executor là Antigravity. Codex lập kế hoạch/review; người dùng nghe x
 
 ## Chưa thuộc phạm vi
 
-Huấn luyện/đổi weights ASR, ITN VI đầy đủ, bảo đảm mọi định dạng trên thế giới, tự động sửa bản dịch không có alignment đáng tin, chứng nhận audio bằng back-ASR hoặc tối ưu NPU khi chưa có thiết bị. Các việc này cần kế hoạch riêng sau bằng chứng vòng này.
+Huấn luyện/đổi weights ASR, ITN VI đầy đủ, bảo đảm mọi định dạng trên thế giới, tự động sửa bản dịch không có alignment đáng tin, chứng nhận audio bằng back-ASR, hoặc compile/relink Context Binary `.bin` mới lên AI Hub cho các node NPU chưa biên dịch của nhánh `asr-speed-accuracy` (`_sv_frontend`, `asr_vi_decoder/joiner`, bucket `@w*`). Các việc đó tách thành kế hoạch P2 riêng sau khi P0/P1 ổn định trên 9 QNN binaries `models_qcs8550` hiện có.

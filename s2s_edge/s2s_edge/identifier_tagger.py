@@ -1,6 +1,24 @@
 """Learned identifier detection. Whitespace tokenization, no format regex rules."""
-import re,unicodedata
+import os,re,unicodedata
 from pathlib import Path
+
+
+def find_crf_model(base_dirs=None):
+ """Locate identifier.crfsuite across env override, packaged assets, and repo models/normalization."""
+ override=os.environ.get('S2S_CRF_MODEL')
+ if override:
+  p=Path(override)
+  if p.is_file():return p
+ here=Path(__file__).resolve()
+ pkg_root=here.parents[1]
+ roots=[pkg_root,here.parents[2]] if base_dirs is None else [Path(d) for d in base_dirs]
+ candidates=[]
+ for r in roots:
+  candidates.append(r/'assets/identifier.crfsuite')
+  candidates.append(r/'models/normalization/identifier.crfsuite')
+ for cand in candidates:
+  if cand.is_file():return cand
+ return pkg_root/'assets/identifier.crfsuite'
 
 def tokens(text):return list(re.finditer(r'\S+',text))
 def lexical(s):return ''.join(c.casefold() for c in s if c.isalnum())
@@ -13,9 +31,12 @@ def features(ms,i,lang):
  return out
 
 class IdentifierTagger:
- def __init__(self,path):
+ def __init__(self,path=None):
   import pycrfsuite
-  self.t=pycrfsuite.Tagger();self.t.open(str(path))
+  resolved=Path(find_crf_model() if path is None else path)
+  if not resolved.is_file():raise FileNotFoundError(f'Missing CRF identifier model: {resolved}')
+  self.path=resolved
+  self.t=pycrfsuite.Tagger();self.t.open(str(resolved))
  def __call__(self,text,lang):
   ms=tokens(text)
   if not ms:return []

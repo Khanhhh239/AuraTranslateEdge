@@ -3,6 +3,8 @@
 Host: SentencePiece tokenize / detokenize and ADAPTIVE CHUNKING: a source piece whose translation is cut by the 15-token limit
 (no </s> in output) is split in two and translated again, so long sentences are complete (costs extra graph calls)."""
 import json, os, re, numpy as np
+from .numeric_guard import extract_known_numeric_spans
+from .source_segmentation import SpanBudgetError, split_preserving_spans
 
 S, T = 32, 16
 CODES = {"vi": "vie_Latn", "en": "eng_Latn", "zh": "zho_Hans", "ko": "kor_Hang"}
@@ -30,13 +32,12 @@ class Nllb:
         self.calls += 1; body = [int(v) for v in out[1:]]
         return body, (2 in body)
 
-    def _split(self, text, src):
-        for rx in (SENT_END, CLAUSE):
-            parts = [p for p in rx.split(text) if p.strip()]
-            if len(parts) > 1: return parts
-        joiner = "" if src in ("zh",) else " "; units = list(text) if src in ("zh", "ko") and " " not in text.strip() else text.split()
-        if len(units) < 2: return [text]
-        h = len(units) // 2; return [joiner.join(units[:h]), joiner.join(units[h:])]
+    def _split(self, text, src, token_limit=None):
+        spans = extract_known_numeric_spans(text, src)
+        toks = self.encode(text)
+        limit = token_limit if token_limit is not None else max(1, min(self.S - 2, max(1, len(toks) // 2)))
+        parts = split_preserving_spans(text, spans, token_limit=limit, encode=self.encode, lang=src)
+        return parts or [text]
 
     def _tr(self, text, src, tgt, depth=0):
         text = text.strip()
@@ -44,24 +45,42 @@ class Nllb:
         toks = self.encode(text)
         if len(toks) <= self.S - 2:
             body, done = self._run(toks, src, tgt)
-            if done or depth > 6:
-                if not done: self.truncations += 1
+            if done:
                 return self.decode(body[: body.index(2)] if 2 in body else body)
-        parts = self._split(text, src)
-        if len(parts) == 1:                                        # cannot split further: accept the truncated output
-            self.truncations += 1; body, _ = self._run(toks[: self.S - 2], src, tgt); return self.decode(body[: body.index(2)] if 2 in body else body)
+            if depth > 6:
+                spans = extract_known_numeric_spans(text, src)
+                if spans:
+                    raise SpanBudgetError(f"Protected span exceeded decoder target budget Tm={getattr(self, 'Tm', 16)}: {text!r}")
+                self.truncations += 1
+                return self.decode(body[: body.index(2)] if 2 in body else body)
+        half_limit = max(1, min(self.S - 2, len(toks) // 2))
+        parts = self._split(text, src, token_limit=self.S - 2 if len(toks) > self.S - 2 else half_limit)
+        if len(parts) == 1:
+            if len(toks) > self.S - 2:
+                raise SpanBudgetError(f"Span exceeds graph input budget S={self.S}: {text!r}")
+            body, done = self._run(toks, src, tgt)
+            if not done:
+                spans = extract_known_numeric_spans(text, src)
+                if spans:
+                    raise SpanBudgetError(f"Protected span exceeded decoder target budget Tm={getattr(self, 'Tm', 16)}: {text!r}")
+                self.truncations += 1
+            return self.decode(body[: body.index(2)] if 2 in body else body)
         sep = "" if tgt == "zh" else " "
         return sep.join(x for x in (self._tr(p, src, tgt, depth + 1) for p in parts) if x)
 
     def __call__(self, text, src, tgt):
-        sents = [p for p in SENT_END.split(text.strip()) if p.strip()]
+        text = (text or "").strip()
+        if not text:
+            return ""
+        spans = extract_known_numeric_spans(text, src)
+        sents = split_preserving_spans(text, spans, token_limit=self.S - 2, encode=self.encode, lang=src)
         sep = "" if tgt == "zh" else " "
         return sep.join(x for x in (self._tr(s, src, tgt) for s in sents) if x)
 
     def translate_atomic(self, text, src, tgt):
         """Translate an already segmented span without splitting its decimal points."""
         if len(self.encode(text)) > self.S - 2:
-            raise ValueError('Prepared MT span exceeds graph input length')
+            raise SpanBudgetError("Prepared MT span exceeds graph input length")
         return self._tr(text, src, tgt)
 
 
@@ -172,6 +191,8 @@ class MtFallback:
     def __call__(self, text, src, tgt):
         while True:
             try: return self.impl(text, src, tgt)
+            except ValueError:
+                raise
             except Exception as e:
                 self._drop(self.active, e); self._next(probe=False)            # raises when nothing is left
 

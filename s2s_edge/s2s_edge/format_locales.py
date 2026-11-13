@@ -11,11 +11,14 @@ LETTERS = {
     'zh': ['诶','比','西','迪','伊','艾弗','吉','艾尺','艾','杰','开','艾勒','艾姆','恩','欧','屁','丘','阿尔','艾丝','提','优','维','达不溜','艾克斯','歪','贼德'],
 }
 IDENTIFIER_CUES = (
-    'phone', 'telephone', 'mobile', 'zip', 'postal', 'postcode', 'flight', 'call',
-    'otp', 'pin', 'serial', 'tracking', 'booking', 'account number', 'order number',
-    'điện thoại', 'di động', 'mã', 'bưu chính', 'chuyến bay', 'số tài khoản', 'gọi số',
-    '전화번호', '우편번호', '항공편', '인증번호', '일련번호', '계좌번호',
-    '电话号码', '手机号', '邮政编码', '邮编', '航班', '验证码', '订单号', '账号', '拨打', '致电',
+    'phone number', 'telephone number', 'account number', 'order number', 'flight number',
+    'postal code', 'zip code', 'tracking number', 'serial number',
+    'phone', 'telephone', 'mobile', 'hotline', 'tel', 'fax', 'zip', 'postal', 'postcode',
+    'flight', 'call', 'code', 'otp', 'pin', 'serial', 'tracking', 'booking',
+    'số điện thoại', 'điện thoại', 'di động', 'gọi số', 'gọi', 'số tài khoản',
+    'mã bưu chính', 'mã zip', 'mã đơn hàng', 'mã đơn', 'mã số', 'mật khẩu', 'mã', 'chuyến bay',
+    '전화번호', '전화', '휴대폰', '연락처', '우편번호', '항공편', '인증번호', '일련번호', '계좌번호', '주문번호', '코드', '비밀번호',
+    '电话号码', '电话', '手机号', '手机', '热线', '座机', '邮政编码', '邮编', '航班号', '航班', '验证码', '订单号', '账号', '代码', '编号', '密码', '拨打', '致电',
 )
 CURRENCY = {
     'USD': {'vi': ('đô la', 'xen'), 'en': ('dollar', 'cent'), 'ko': ('달러', '센트'), 'zh': ('美元', '美分')},

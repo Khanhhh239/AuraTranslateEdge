@@ -569,7 +569,8 @@ def run_evaluation(
         try:
             wav = load_audio(str(wav_path))
             results = []
-            max_seg_s = min(float(engine.asr(src).max_s), 12.0)
+            from s2s_edge.audio import effective_max_s
+            max_seg_s = effective_max_s(float(engine.asr(src).max_s), vad_profile=effective["vad_profile"])
             spans = seg_fn(wav, max_seg_s, effective["vad_profile"])
             for a, b in spans:
                 z = engine.translate_segment(wav[a:b], src, tgt)
@@ -663,7 +664,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--run-id", required=True, help="Unique immutable run identifier (cannot be 'before'/'after' or already exist).")
     ap.add_argument("--manifest", default=str(DEFAULT_MANIFEST), help="Fixture manifest JSON path.")
     ap.add_argument("--source-mode", choices=["0", "1"], default=None, help="S2S_NEURAL_TN value; preserves caller env when omitted.")
-    ap.add_argument("--vad-profile", choices=["legacy", "upstream"], default=None, help="VAD profile; defaults to safe 'legacy'.")
+    ap.add_argument("--vad-profile", choices=["legacy", "upstream", "hybrid"], default=None, help="VAD profile; defaults to safe 'legacy'.")
     ap.add_argument("--ort-policy", choices=["basic", "disable", "auto"], default=None, help="ONNX Runtime session optimization policy.")
     ap.add_argument("--tts-format", choices=["hybrid", "legacy", "neural"], default=None, help="TTS format mode.")
     ap.add_argument("--models", default=str(DEFAULT_MODELS), help="models.json path.")

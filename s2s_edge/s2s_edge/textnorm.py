@@ -184,12 +184,14 @@ def _punct_clause(c):
         is_q = False
     if core_last in ("không", "chưa") and len(words) <= 2 and words[0] in ("không", "chưa", "tôi", "em"):
         is_q = False
-    # CAPU can split a spoken numeric sequence into clauses. A numeric zero
-    # at the end of such a statement is not a yes/no question particle.
+    # CAPU/ASR can emit a spoken numeric sequence without punctuation.
+    # A numeric zero at the end of such a statement is not a yes/no question particle,
+    # unless framed as an explicit "có ... không" question ("Anh có số không.").
     numeric_words = [w.strip(',;:') for w in words]
     numeric_clause = all(w in _VI_NUMBER_WORDS or w.isdecimal() for w in numeric_words)
-    call_zero = bool(re.search(r'\b(?:gọi|liên hệ)\b.*\bsố\s+không$', low))
-    if last_mark == '.' and core_last == 'không' and (numeric_clause or call_zero):
+    call_zero = bool(re.search(r'\b(?:gọi|liên hệ|mã)\b.*\bsố\s+không$', low))
+    is_co_question = bool(re.search(r'\bcó\b.*\bkhông$', low))
+    if core_last == 'không' and last_mark != '?' and not is_co_question and (numeric_clause or call_zero):
         is_q = False
 
     # 2. Exclamation check
@@ -208,15 +210,78 @@ def _punct_clause(c):
     return _cap_vi(s) + mark
 
 
-def vi_punct(text):
+def _split_clauses_preserving_spans(t, spans):
+    if not spans:
+        return [c.strip() for c in re.split(r"(?<=[.?!])\s+", t) if c.strip()]
+    out = []
+    cursor = 0
+    for m in re.finditer(r"(?<=[.?!])\s+", t):
+        pos = m.start()
+        if any(sp.start < pos < sp.end or sp.start < m.end() < sp.end for sp in spans):
+            continue
+        piece = t[cursor:pos].strip()
+        if piece:
+            out.append(piece)
+        cursor = m.end()
+    tail = t[cursor:].strip()
+    if tail:
+        out.append(tail)
+    return out
+
+
+def vi_punct(text, breaks=None):
     """Restore sentence capitalization, punctuation ('?', '!', '.') and clause splitting on Vietnamese ASR transcripts.
+    `breaks`: optional 1-indexed word boundary positions (e.g. from audio pauses >= 320 ms); inserts a sentence break where '.?!' is absent.
     Ensures interrogative and imperative contexts are preserved for accurate downstream NLLB MT translation."""
+    from .numeric_guard import extract_known_numeric_spans, guard_source_numeric_changes
+
+    vi_punct.last_validation = None
     t = re.sub(r"\s+", " ", text).strip()
-    if not t: return t
+    if not t:
+        vi_punct.last_validation = guard_source_numeric_changes(text, t, "vi")
+        return t
 
     for pat, repl in _SPLIT_PATTERNS:
         t = pat.sub(repl, t)
 
-    raw_clauses = [c.strip() for c in re.split(r"(?<=[.?!])\s+", t) if c.strip()]
+    spans = extract_known_numeric_spans(t, "vi")
+
+    if breaks:
+        words = t.split()
+        joined = " ".join(words)
+        joined_spans = extract_known_numeric_spans(joined, "vi")
+        word_offsets = []
+        pos = 0
+        for w in words:
+            word_offsets.append((pos, pos + len(w)))
+            pos += len(w) + 1
+        for k in sorted(set(breaks)):
+            if 0 < k < len(words) and words[k - 1][-1] not in ".?!":
+                wa, wb = word_offsets[k - 1]
+                # Never insert a pause break inside a protected numeric/ID span.
+                if any(sp.start <= wa and wb < sp.end for sp in joined_spans):
+                    continue
+                w = words[k - 1].rstrip(",:;")
+                if w:
+                    words[k - 1] = w + "."
+        t = " ".join(words)
+        spans = extract_known_numeric_spans(t, "vi")
+
+    raw_clauses = _split_clauses_preserving_spans(t, spans)
     out = [_punct_clause(c) for c in raw_clauses]
-    return " ".join(out)
+    result = " ".join(out)
+
+    report = guard_source_numeric_changes(text, result, "vi")
+    if report.status == "invalid":
+        fallback = re.sub(r"\s+", " ", text).strip()
+        fb_report = guard_source_numeric_changes(text, fallback, "vi")
+        fb_report.fallback_policy = "fallback_to_raw_source"
+        fb_report.warnings.append({"code": "vi_punct_output_rejected", "issues": list(report.issues)})
+        vi_punct.last_validation = fb_report
+        return fallback
+
+    vi_punct.last_validation = report
+    return result
+
+
+vi_punct.last_validation = None

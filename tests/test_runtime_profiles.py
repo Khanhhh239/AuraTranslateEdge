@@ -594,9 +594,16 @@ class RealAsrVadRegressionTests(unittest.TestCase):
 
             # --reload succeeds when idle (pending == 0) and PID present
             # Sequence: initial healthy -> None after SIGTERM -> new healthy after spawn
-            seq = [dict(matching_health), None, {**matching_health, "source_mode": "1", "pid": 99991}]
+            reloaded_profile = {**matching_profile, "source_mode": "1"}
+            reloaded_health = {
+                **matching_health,
+                **reloaded_profile,
+                "effective_profile": reloaded_profile,
+                "pid": 99991,
+            }
+            seq = [dict(matching_health), None, dict(reloaded_health)]
             def seq_health(_u):
-                return seq.pop(0) if seq else {**matching_health, "source_mode": "1", "pid": 99991}
+                return seq.pop(0) if seq else dict(reloaded_health)
 
             res_rel = start_s2s_web.launch_or_reuse(
                 args_reload,
