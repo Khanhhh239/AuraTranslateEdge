@@ -57,7 +57,10 @@ def inputs_for(reg, key):
 def compare(a, b):
     a, b = np.asarray(a), np.asarray(b)
     if a.size != b.size: return "size", float("nan")
-    if np.issubdtype(b.dtype, np.integer): return "int", float((a.reshape(-1).astype(np.int64) == b.reshape(-1).astype(np.int64)).mean())
+    if np.issubdtype(b.dtype, np.integer):
+        x, y = a.reshape(-1).astype(np.int64), b.reshape(-1).astype(np.int64); nz = (x != 0) | (y != 0)
+        if y.size > 64 and nz.any(): return "int", float((x[nz] == y[nz]).mean())      # padded id/byte buffers (SenseVoice): judge the real content only
+        return "int", float((x == y).mean())
     x, y = a.reshape(-1).astype(np.float64), b.reshape(-1).astype(np.float64)
     if not np.any(np.abs(x) > 1e-9) and not np.any(np.abs(y) > 1e-9): return "zero", 1.0     # both all-zero (e.g. Piper's OOV count): equal, cosine is undefined
     return "cos", float(x @ y / (np.linalg.norm(x) * np.linalg.norm(y) + 1e-12))

@@ -101,7 +101,7 @@ class Transducer:
     (~1 MMAC per frame). Greedy search with at most one symbol per frame, as icefall greedy_search / sherpa-onnx."""
 
     def __init__(self, decoder_onnx, joiner_onnx):
-        import onnxruntime as ort                                        # only onnxruntime: the box installs requirements.txt offline (no `onnx`)
+        from . import cpu_ort; ort = cpu_ort()                           # the REAL onnxruntime (qai_appbuilder replaces the module on the box); no `onnx` offline
         so = ort.SessionOptions(); so.log_severity_level = 3; so.intra_op_num_threads = 1
         self.dec = ort.InferenceSession(decoder_onnx, so, providers=["CPUExecutionProvider"]); self.dec_in = self.dec.get_inputs()[0].name
         self.ctx = int(self.dec.get_modelmeta().custom_metadata_map.get("context_size", 2)); self.cache = {}; self.W = self.joi = None

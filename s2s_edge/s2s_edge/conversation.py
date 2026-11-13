@@ -15,6 +15,9 @@ from .asr import AsrXx
 from .names import NameTransliterator
 from .textnorm import vi_punct
 from . import neural_textnorm
+from .asr_clean import clean_asr, clean_mt
+from .ko_polite import polite as ko_polite
+MT_SPLIT = os.environ.get("S2S_MT_SPLIT", "1") != "0"
 
 # Punctuation/casing for the Vietnamese ASR text (Zipformer outputs lower case, no punctuation) before MT:
 #   S2S_VI_PUNCT=model : (default) vibert-capu int8 on the CPU (s2s_edge/punct_vi.py), falls back to the rule when assets/vi_capu is missing.
@@ -130,9 +133,9 @@ class Engine:
             neural_textnorm.warn_unusable("source_mode=1"); return False
         return want
 
-    def _punct_stage(self, text, src, raw_words, word_ends, breaks):
+    def _punct_stage(self, text, src, raw_words, word_ends, breaks, min_chars=2):
         """-> (text, parts). parts is the list of MT units from the neural source normalizer (source_mode=1), else None."""
-        if len(re.sub(r"[\W_]+", "", text)) < 2: return "", None                           # nothing intelligible (noise, breath, a lone "I.")
+        if len(re.sub(r"[\W_]+", "", text)) < min_chars: return "", None                           # nothing intelligible (noise, breath, a lone "I.")
         if src in ("vi", "en") and self.neural_enabled():
             parts = neural_textnorm.get().prepare_source(text, src, self.mt.S - 2, self.mt.encode)
             return " ".join(parts), parts
@@ -146,26 +149,45 @@ class Engine:
         """Plan-01 API (tools/evaluate_asr_integration.py): source preparation without pause hints."""
         return self._punct_stage(text, src, text.split(), None, None) if text else (text, None)
 
+    def translate_text_tagged(self, text, src, tgt, parts=None):
+        """Text -> (target text, tags): the one MT path of every caller (file, live, stream, web batch, typed text, web demo).
+        Units: `parts` from the neural source normalizer (source_mode=1, translated atomically), else split_sentences (the same splitter the MT class
+        uses, so a lone "Vâng." stays attached to its neighbour; S2S_MT_SPLIT=0 skips it). Per unit: MT -> clean_mt (block symbols, copied "问:" label,
+        leading dash, "。" in vi/en) -> Latin-name transliteration (zh/ko) -> Korean politeness (S2S_KO_POLITE=0 disables)."""
+        if not text or not text.strip(): return "", []
+        if parts is not None: units, run = list(parts), (lambda p: self.mt.translate_atomic(p, src, tgt))
+        else: units, run = (split_sentences(text, src) if MT_SPLIT else [text]), (lambda p: self.mt(p, src, tgt))
+        outs, tags = [], []
+        for p in units:
+            m, tg = clean_mt(run(p), p, tgt)
+            if tgt in ("zh", "ko") and m and self.names: m = self.names(m, tgt)
+            if tgt == "ko" and m: m = ko_polite(m)
+            if m: outs.append(m)
+            tags += [x for x in tg if x not in tags]
+        if len(units) > 1: tags.append("mt_split")
+        return ("" if tgt == "zh" else " ").join(outs), tags
+
     def translate_text(self, text, src, tgt, parts=None):
-        if not text.strip(): return ""
-        if parts is None: return self.mt(text, src, tgt)
-        return ("" if tgt == "zh" else " ").join(self.mt.translate_atomic(p, src, tgt) for p in parts)
+        """Plan-01 API: target text only (see translate_text_tagged)."""
+        return self.translate_text_tagged(text, src, tgt, parts)[0]
 
     def translate_segment(self, wav, src, tgt, text=None, prepped=False, breaks=None):
         """text: pre-computed ASR text (language identification already ran the ASR)."""
         wav = wav if prepped else self.prep(wav); gr = self.graphs_for(src, tgt); g0, c0 = self.gtime(gr); t = {}; a = time.perf_counter()
         text, raw_words, word_ends = self._asr_stage(wav, src, text)
         b = time.perf_counter(); t["asr_s"] = b - a
-        asr_text = text if len(re.sub(r"[\W_]+", "", text)) >= 2 else ""
-        text, prepared = self._punct_stage(text, src, raw_words, word_ends, breaks)
+        asr_raw = text; text, clean_tags = clean_asr(text, src)                               # stray label ("Q. "), leading "Um.", stuck repeats, nothing intelligible (noise, breath, a lone "I.")
+        asr_text = text
+        text, prepared = self._punct_stage(text, src, raw_words, word_ends, breaks, min_chars=1) if text else ("", None)   # clean_asr already dropped junk; "好。" is a real answer
         t["source_normalize_s"] = time.perf_counter() - b
-        mt_text = self.translate_text(text, src, tgt, prepared)
-        if tgt in ("zh", "ko") and mt_text: mt_text = self.names(mt_text, tgt)
+        mt_text, mt_tags = self.translate_text_tagged(text, src, tgt, prepared)              # sentence by sentence + output guard + names + ko politeness
         c = time.perf_counter(); t["mt_s"] = c - b - t["source_normalize_s"]; tts = self.tts(tgt)
         out, sr = tts.synthesize(mt_text) if mt_text.strip() else (np.zeros(0, np.float32), tts.sr); d = time.perf_counter(); t["tts_s"] = d - c
         g1, c1 = self.gtime(gr); t["total_s"] = d - a; t["graph_s"] = g1 - g0; t["graph_calls"] = c1 - c0; t["host_s"] = t["total_s"] - t["graph_s"]
         t["audio_in_s"] = len(wav) / SR; t["audio_out_s"] = len(out) / sr
-        return dict(src=src, tgt=tgt, asr=text, asr_before_normalization=asr_text, mt=mt_text, tts_text=getattr(tts, "tts_input_text", mt_text) if mt_text.strip() else '', tts_format=getattr(tts, 'format_trace', {}) if mt_text.strip() else {}, wav=out, sr=sr, timing=t)
+        return dict(src=src, tgt=tgt, asr=text, asr_before_normalization=asr_text, asr_raw=asr_raw, asr_clean=clean_tags + mt_tags, mt=mt_text,
+                    tts_text=getattr(tts, "tts_input_text", mt_text) if mt_text.strip() else "", tts_format=getattr(tts, "format_trace", {}) if mt_text.strip() else {},
+                    wav=out, sr=sr, timing=t)
 
     def translate_segment_stream(self, wav, src, tgt, text=None, prepped=False, breaks=None):
         """Pipelined version for live output: ASR once, split the (punctuated) transcript into sentences, then MT + TTS sentence by sentence and
@@ -174,32 +196,22 @@ class Engine:
         wav = wav if prepped else self.prep(wav); gr = self.graphs_for(src, tgt); a = time.perf_counter()
         text, raw_words, word_ends = self._asr_stage(wav, src, text)
         asr_s = time.perf_counter() - a
-        text, prepared = self._punct_stage(text, src, raw_words, word_ends, breaks)
+        asr_raw = text; text, clean_tags = clean_asr(text, src)
+        text, prepared = self._punct_stage(text, src, raw_words, word_ends, breaks, min_chars=1) if text else ("", None)   # clean_asr already dropped junk; "好。" is a real answer
         if not text: return
         parts = prepared if prepared is not None else split_sentences(text, src); tts = self.tts(tgt)
         for i, sent in enumerate(parts):
             g0, c0 = self.gtime(gr); b = time.perf_counter()
-            mt_text = self.translate_text(sent, src, tgt, [sent] if prepared is not None else None)
-            if tgt in ("zh", "ko") and mt_text: mt_text = self.names(mt_text, tgt)
+            mt_text, mt_tags = self.translate_text_tagged(sent, src, tgt, [sent] if prepared is not None else None)
             c = time.perf_counter(); out, sr = tts.synthesize(mt_text) if mt_text.strip() else (np.zeros(0, np.float32), tts.sr); d = time.perf_counter()
             g1, c1 = self.gtime(gr); t = dict(asr_s=asr_s if i == 0 else 0.0, mt_s=c - b, tts_s=d - c, total_s=(d - a) if i == 0 else (d - b), graph_s=g1 - g0, graph_calls=c1 - c0)
             t["host_s"] = t["total_s"] - t["graph_s"]; t["audio_in_s"] = len(wav) / SR if i == 0 else 0.0; t["audio_out_s"] = len(out) / sr
-            yield dict(src=src, tgt=tgt, asr=sent, mt=mt_text, tts_text=getattr(tts, 'tts_input_text', mt_text) if mt_text.strip() else '', tts_format=getattr(tts, 'format_trace', {}) if mt_text.strip() else {}, wav=out, sr=sr, timing=t, part=(i, len(parts)))
+            yield dict(src=src, tgt=tgt, asr=sent, asr_raw=asr_raw, asr_clean=clean_tags + mt_tags, mt=mt_text,
+                       tts_text=getattr(tts, "tts_input_text", mt_text) if mt_text.strip() else "", tts_format=getattr(tts, "format_trace", {}) if mt_text.strip() else {},
+                       wav=out, sr=sr, timing=t, part=(i, len(parts)))
 
 
-_SENT = re.compile(r"(?<=[\.\!\?。！？])\s+|(?<=[。！？])")
-
-
-def split_sentences(text, lang):
-    """Sentences of a punctuated transcript (vibert-capu output for vi, SenseVoice for en/zh/ko). Pieces of < 2 words (< 3 chars for zh/ko,
-    e.g. a lone 'Vâng.') are merged into the neighbour so MT never gets a fragment out of context."""
-    parts = [p.strip() for p in _SENT.split(text.strip()) if p and p.strip()]
-    small = (lambda p: len(re.sub(r"\W", "", p)) < 3) if lang in ("zh", "ko") else (lambda p: len(p.split()) < 2)
-    out = []
-    for p in parts:
-        if out and (small(p) or small(out[-1])): out[-1] = (out[-1] + ("" if lang in ("zh",) else " ") + p).strip()
-        else: out.append(p)
-    return out or [text]
+from .mt import split_sentences                                                    # one sentence splitter for the pipeline and the MT class
 
 
 class LanguageID:
@@ -258,7 +270,9 @@ class Conversation:
     def translate(self, wav, max_seg_s=None, vad_profile=None):
         out = []
         for (a, b), brk in self._segments(wav, max_seg_s, vad_profile):
-            seg = self.e.prep(wav[a:b]); src, tgt, text, st = self.route(seg); r = self.e.translate_segment(seg, src, tgt, text=text, prepped=True, breaks=brk)
+            seg = self.e.prep(wav[a:b]); t0 = time.perf_counter(); src, tgt, text, st = self.route(seg); dt = time.perf_counter() - t0
+            r = self.e.translate_segment(seg, src, tgt, text=text, prepped=True, breaks=brk)
+            tm = r.setdefault("timing", {}); tm["asr_s"] = tm.get("asr_s", 0.0) + dt; tm["total_s"] = tm.get("total_s", 0.0) + dt   # route() = ASR + language id (graph_s excludes it)
             r["span"] = (a / SR, b / SR); r["lid"] = st
             if r["mt"]: out.append(r)
         return out
@@ -266,7 +280,8 @@ class Conversation:
     def translate_stream(self, wav, max_seg_s=None, vad_profile=None):
         """Generator: one result per sentence as soon as its audio is ready (see Engine.translate_segment_stream)."""
         for (a, b), brk in self._segments(wav, max_seg_s, vad_profile):
-            seg = self.e.prep(wav[a:b]); src, tgt, text, st = self.route(seg)
+            seg = self.e.prep(wav[a:b]); t0 = time.perf_counter(); src, tgt, text, st = self.route(seg); dt = time.perf_counter() - t0
             for r in self.e.translate_segment_stream(seg, src, tgt, text=text, prepped=True, breaks=brk):
+                if r.get("part", (0, 1))[0] == 0: tm = r.setdefault("timing", {}); tm["asr_s"] = tm.get("asr_s", 0.0) + dt; tm["total_s"] = tm.get("total_s", 0.0) + dt   # route() = ASR + language id
                 r["span"] = (a / SR, b / SR); r["lid"] = st
                 if r["mt"]: yield r
