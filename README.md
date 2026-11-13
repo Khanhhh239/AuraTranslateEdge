@@ -1,179 +1,336 @@
-# OneVoice — Hệ Thống Dịch Giọng Nói Sang Giọng Nói (Speech-to-Speech E2E)
-### Tích hợp Runtime Trọn Gói, Module TTS Hybrid Format Nâng Cấp & Bộ Báo Cáo Thực Nghiệm
+# AuraTranslate Edge - OneVoice
+
+OneVoice AI Challenge 2026
+
+**AuraTranslate Edge** là thiết bị phiên dịch giọng nói hai chiều (Speech-to-Speech Edge Translation Appliance) hoạt động **100% offline, NPU-native** trên nền tảng phần cứng **Qualcomm Hexagon HTP v73** (Trọng tâm Phase 3: **HSPTEK AIBOX 8550 / SoC Qualcomm QCS8550**). 
+
+Hệ thống kết nối chuỗi xử lý đầu cuối trực tiếp: **VAD năng lượng thích ứng → ASR (Zipformer / SenseVoice) → Chuẩn hoá & Phục hồi dấu câu tiếng Việt (`punct_vi`) → MT (Dịch máy NLLB) → TTS (Tổng hợp âm thanh Piper / MeloTTS / Supertonic)**, hỗ trợ trọn vẹn 6 chiều dịch hai chiều:
+$$\text{Tiếng Việt (VI)} \longleftrightarrow \text{Tiếng Anh (EN)} \;\big|\; \text{Tiếng Hàn (KO)} \;\big|\; \text{Tiếng Trung (ZH)}$$
+
+Dự án được đồng thiết kế (hardware-software co-design) bởi đội ngũ **Gia Sư Đỉnh Cao** cho cuộc thi **OneVoice AI Challenge 2026** (do **Saigon AI Hub × Qualcomm** tổ chức), hướng tới giải quyết bài toán giao tiếp thời gian thực không độ trễ, bảo mật tuyệt đối tại các nhà máy sản xuất FDI, khu công nghiệp và môi trường thương mại song phương.
 
 ---
 
-## 1. Giới thiệu tổng quan
+## 1. Hiện trạng kỹ thuật & Điểm đột phá cốt lõi (Key Technical Differentiators)
 
-Thư mục này là **bản đóng gói hoàn chỉnh End-to-End (E2E)** của hệ thống OneVoice Speech-to-Speech (S2S), hỗ trợ 4 ngôn ngữ (**Tiếng Việt `vi`, Tiếng Anh `en`, Tiếng Hàn `ko`, Tiếng Trung `zh`**). 
+Toàn bộ pipeline phiên dịch của dự án được đóng gói trong engine triển khai chuyên dụng [`s2s_edge/`](s2s_edge/), đã được biên dịch, nạp và xác minh thành công trên NPU Qualcomm Hexagon v73 qua **Qualcomm AI Hub**:
 
-Hệ thống đã được tích hợp mặc định bộ xử lý **TTS Hybrid Format** (`S2S_TTS_FORMAT=hybrid`), giải quyết triệt để các lỗi đọc sai định dạng số, giờ giấc, ngày tháng, mã bưu chính (ZIP), số điện thoại và mã định danh mà không làm biến đổi hay ảo giác (hallucination) dữ liệu gốc.
-
----
-
-## 2. Kiến trúc luồng xử lý End-to-End (E2E Pipeline)
-
-```
-[Audio Đầu Vào]
-       │
-       ▼
-[Audio Segmenter & VAD]
-       │
-       ▼
-[ASR - Nhận dạng giọng nói]
-  ├── Tiếng Việt: Zipformer-Small (CTC static 1500)
-  └── EN / KO / ZH: SenseVoice-Small (2-graph ONNX)
-       │
-       ▼
-[Khôi phục dấu câu & Viết hoa (Punctuation Restoration)]
-  └── viBERT-CAPU (int8 ONNX, torch-free)
-       │
-       ▼
-[MT - Dịch máy đa ngữ]
-  └── NLLB-600M (Encoder + Unrolled Decoder Beam 4, Vocabulary Pruned)
-       │
-       ▼
-[★ NÂNG CẤP: TTS Hybrid Format Text Normalization]
-  ├── Parser có kiểu nhận diện: giờ, ngày, tiền tệ, số âm, thập phân, %, đơn vị
-  ├── Bộ quy tắc & CRF bảo vệ mã: ZIP, phone, flight code, alnum
-  └── Adaptive Chunking: Tính ngân sách graph chuẩn xác (gồm cả NFKD Jamo tiếng Hàn)
-       │
-       ▼
-[TTS - Tổng hợp giọng nói]
-  ├── Tiếng Việt: Piper VITS (piper_vi_full_g8.onnx)
-  ├── EN / KO: Supertonic 3 (fused text-to-wav single graph)
-  └── Tiếng Trung: MeloTTS-ZH (fused UTF-8 -> 44.1 kHz audio)
-       │
-       ▼
-[Audio Đầu Ra (WAV)]
-```
+1. **100% Offline & NPU-Native (0.0% CPU Fallback trong các đồ thị mạng nơ-ron):**
+   - Cả **9 đồ thị mô hình (9 model graphs)** cấu thành toàn bộ chuỗi S2S đã được compile và link thành các file nhị phân tĩnh **QNN Context Binary (`.bin`)** với QAIRT 2.51.
+   - Đã kiểm chứng profile & inference thực tế trên phần cứng thật qua Qualcomm AI Hub: **0% CPU fallback** trên chip NPU Hexagon v73. Host CPU chỉ đảm nhận các tác vụ tính toán I/O nhẹ (đọc WAV, VAD năng lượng, CTC collapse, ghép chuỗi SentencePiece).
+2. **Kiến trúc 2 Backend linh hoạt (`--backend npu` vs `--backend cpu`):**
+   - Hỗ trợ chuyển đổi liền mạch giữa runtime tăng tốc phần cứng NPU trên thiết bị thật và runtime tham chiếu CPU (ONNX Runtime) trên laptop phát triển.
+   - Đi kèm bộ công cụ đối chứng toán học [`golden.py`](s2s_edge/tools/golden.py) kiểm định cosine similarity (đều đạt $\ge 0.999$) giữa NPU và CPU trước khi chạy thử nghiệm.
+3. **Phục hồi dấu câu & Viết hoa tiếng Việt (`punct_vi` / `vi_capu`):**
+   - Khắc phục triệt để "tử huyệt" của các hệ thống S2S ghép tầng: đầu ra ASR thường là chuỗi chữ thường không dấu câu, khiến mô hình dịch NLLB-200 (vốn học từ văn bản chuẩn) dịch sai ngữ cảnh, ngắt nhịp vụn vỡ.
+   - Module `punct_vi` khôi phục dấu chấm, dấu phẩy và chữ viết hoa từ tín hiệu văn bản, giúp tăng vọt điểm dịch: **VI→EN chrF tăng từ 53.8 lên 55.6** và **VI→KO BLEU tăng từ 23.8 lên 30.0** trên tập mẫu của BTC.
+4. **Tách Encoder và Decoder Step tuần tự tĩnh (Fast Host Decode Loop with Static KV-Cache):**
+   - Giải quyết giới hạn nghiêm trọng của đồ thị mở rộng 16 bước (unrolled 16-step DLC trước đây nặng tới 8.8 GB và bị trần 15 token).
+   - Tách thành đồ thị Encoder 64 token tĩnh (`mt_enc`: chỉ **7.5 ms** trên chip) và đồ thị một bước giải mã (`mt_dec`: **15.2 ms/bước** chế độ Greedy; `mt_decB`: **30.8 ms/bước** chế độ 4-Beam search). Giảm dung lượng context binary xuống chỉ còn 0.64 GB + 0.93 GB, hỗ trợ độ dài câu tùy biến không giới hạn.
+5. **Công thức lượng tử hoá lai W8A16 & Giữ nguyên độ phân giải Vocoder:**
+   - Trọng số INT8 giúp nén bộ nhớ, kích hoạt INT16/FP16 bảo toàn thanh điệu sắc/huyền/hỏi/ngã tiếng Việt và bốn thanh điệu tiếng Trung.
+   - Giữ nguyên độ chính xác cao cho vocoder/ODE steps (Piper VITS và Supertonic Flow-matching), triệt tiêu hoàn toàn tiếng rè kim loại hay vỡ âm của các giải pháp INT8 thuần.
+6. **VAD năng lượng thích ứng cục bộ (Adaptive Local Energy VAD):**
+   - Thuật toán VAD dựa trên mức năng lượng RMS tương đối cục bộ thay vì ngưỡng tĩnh, tự động thích ứng với micro độ nhạy thấp (RMS $5 \times 10^{-4}$) và loại bỏ tạp âm nền mà không tốn chu kỳ NPU của mô hình nơ-ron VAD riêng.
 
 ---
 
-## 3. Chi tiết Nâng cấp TTS Hybrid Format
+## 2. Nền tảng phần cứng mục tiêu (Hardware Platforms)
 
-### 3.1. Cơ chế hoạt động
-* **Bảo toàn dữ liệu tuyệt đối:** Sử dụng parser grammar xác định loại dữ liệu và chuyển đổi lời đọc theo quy tắc chuẩn ngôn ngữ đích, **không để model tự do sinh lại số hay chữ**.
-* **Độ trễ siêu thấp:** Thời gian xử lý chuẩn hóa CPU trung bình chỉ **0,23 ms** (median 0,17 ms, p95 0,47 ms), không làm ảnh hưởng đến độ trễ thời gian thực.
-* **Ngân sách chia đoạn an toàn:** Tự động chia nhỏ câu theo ranh giới từ và byte UTF-8; với tiếng Hàn, tự động phân tích và tính toán chiều dài sau khi tách âm tiết thành Jamo (NFKD).
+Trong Phase 3, hệ thống tập trung triển khai và đo kiểm trực tiếp trên thiết bị phần cứng mục tiêu **HSPTEK AIBOX 8550** (SoC Qualcomm QCS8550, NPU Hexagon HTP v73, QAIRT 2.51):
 
-### 3.2. Khắc phục các lỗi định dạng thực tế
-| Định dạng | Ví dụ đầu vào | Trước nâng cấp (Lỗi) | Sau nâng cấp (TTS Hybrid) |
-|---|---|---|---|
-| **Giờ phút** | `5:30 sáng` | "năm : ba mươi" | **"năm giờ ba mươi phút sáng"** |
-| **Giờ chẵn** | `08:00` | "tám : không" | **"tám giờ"** |
-| **Mã bưu chính** | `ZIP 67297` | "sáu mươi bảy nghìn..." | **"ZIP sáu bảy hai chín bảy"** (đọc từng số) |
-| **Số nhà** | `Số nhà 734` | "năm ba mươi bốn" (ByT5 sai) | **"Số nhà bảy trăm ba mươi bốn"** |
-| **Số điện thoại** | `0908 246 135` | "chín trăm linh tám..." | **"không chín không tám hai bốn sáu..."** |
-| **Mã chuyến bay** | `VN247` | "vơn hai trăm..." | **"vê en hai bốn bảy"** |
-| **Tiền tệ** | `$18.25` | "$ mười tám chấm..." | **"mười tám đô la hai mươi lăm xen"** (EN: *eighteen dollars twenty-five cents*) |
-| **Tiếng Hàn** | `3:30` | Lỗi chia Jamo / cắt âm | **`세 시 삼십 분`** (bảo toàn ngân sách Jamo) |
-| **Tiếng Trung** | Năm `2027` | Đọc thành số đếm | **`二零二七`** (sửa cả thang 10^12 万亿) |
+| Thông số / Đặc tính | HSPTEK AIBOX 8550 (Thiết bị triển khai Phase 3) |
+|---|---|
+| **SoC / Vi xử lý** | **Qualcomm QCS8550** (Snapdragon 8 Gen 2 for IoT) |
+| **Kiến trúc NPU** | **Qualcomm Hexagon HTP v73** (lên tới 48 INT8 TOPS) |
+| **Định dạng tối ưu** | ✅ **W8A16 & Native FP16** (100% NPU offload qua QAIRT 2.51) |
+| **Dung lượng RAM** | **16 GB LPDDR5x** (đáp ứng nạp an toàn bộ mô hình ~2.2 GB) |
+| **Bộ nhớ trong (Storage)** | 128 GB UFS 3.1 / 4.0 |
+| **Hệ điều hành** | Ubuntu 22.04 LTS (Kernel 5.15 aarch64, glibc 2.35, Python 3.10) |
+| **Giao thức gọi NPU** | FastRPC (`/dev/adsprpc-smd`), `libcdsprpc.so`, user `system` |
+| **Công suất tiêu thụ (TDP)** | **SoC ~3.5 – 12 W** (Toàn hộp: ~5.8 – 8.8 W, tản nhiệt nhôm thụ động) |
+| **Giao diện âm thanh (Audio I/O)** | Micro + Loa ngoài qua cổng USB 3.0 (ALSA `snd-usb-audio`) |
+| **Kết nối vận hành** | USB Type-C (ADB shell) / Cổng mạng RJ45 Ethernet |
 
----
-
-## 4. Danh mục Báo cáo & Tài liệu Thực nghiệm (Thư mục `reports/`)
-
-Toàn bộ các tài liệu đánh giá và báo cáo định dạng TTS được lưu trữ tại `reports/`:
-
-1. **[bao-cao-format-tts-hybrid.pdf](reports/bao-cao-format-tts-hybrid.pdf)** *(57 KB)*:
-   * **Báo cáo chính thức:** *"Format TTS hybrid — Đã làm được & việc tiếp theo"* (Bản cập nhật ngày 12/11/2026).
-   * Phân tích thực nghiệm trên 4 ngôn ngữ (VI/EN/KO/ZH), 55 ví dụ ngữ nghĩa, 1.600 ca sinh cấu trúc và đối chiếu ASR Whisper.
-2. **[bao-cao-tts-anh-viet-3-phuong-phap.pdf](reports/bao-cao-tts-anh-viet-3-phuong-phap.pdf)** *(148 KB)*:
-   * Báo cáo nghiên cứu so sánh 3 phương pháp: **M1 (WFST)**, **M2 (CRF + WFST)** và **M3 (WFST + DistilBERT)** trên 96 ca thử nghiệm.
-3. **[bao-cao-fix-normalize-anh-viet.pdf](reports/bao-cao-fix-normalize-anh-viet.pdf)** *(61 KB)*:
-   * Báo cáo về các cải tiến chuẩn hóa văn bản trước MT và sau MT.
-4. **[bao_cao_danh_gia_audio_en_vi.pdf](reports/bao_cao_danh_gia_audio_en_vi.pdf)** *(804 KB, kèm bản HTML [bao_cao_danh_gia_audio_en_vi.html](reports/bao_cao_danh_gia_audio_en_vi.html))*:
-   * Báo cáo phân tích đối chiếu lỗi và thẩm định chất lượng Speech-to-Speech chiều Anh - Việt.
-5. **[hybrid_format_plan.md](reports/hybrid_format_plan.md)**:
-   * Kế hoạch triển khai 7 bước và tiêu chí nghiệm thu không lỗi giá trị.
-6. **Thư mục [results_hybrid_format/](reports/results_hybrid_format/)**:
-   * Tập hợp các kết quả máy đọc được: `evaluation.json`, `semantic_examples.json`, `cardinal_crosscheck.json`, `audio_crosscheck.json`.
+> [!NOTE]
+> Báo cáo khảo sát phần cứng chi tiết và kế hoạch đo kiểm on-device tại VNG Campus được lưu tại [`docs/plan_os_hardware.pdf`](docs/plan_os_hardware.pdf) và [`docs/report_aibox8550.pdf`](docs/report_aibox8550.pdf).
 
 ---
 
-## 5. Cấu trúc thư mục
+## 3. Kiến trúc Pipeline & Bảng thông số 9 đồ thị NPU
 
-```
-OneVoice_E2E_HybridTTS/
-├── README.md                          # Tài liệu tổng quan này
-├── requirements.txt                   # Danh sách thư viện Python
-├── s2s_edge/                          # Core Runtime Package (ASR, MT, Hybrid TTS, Punct)
-│   ├── s2s_edge/                      # Các module Python chính
-│   │   ├── hybrid_textnorm.py         # Module chuẩn hóa Hybrid chính
-│   │   ├── format_locales.py          # Quy tắc đọc số/ngày/giờ/đơn vị 4 ngôn ngữ
-│   │   ├── tts_format.py              # Chunking & điều phối TTS format
-│   │   ├── identifier_tagger.py       # Nhận diện chuỗi mã (CRF)
-│   │   ├── identifiers.py             # Bộ quy tắc bảo vệ thực thể
-│   │   ├── tts.py                     # Wrapper TTS thống nhất (Piper/Supertonic/Melo)
-│   │   ├── asr.py, mt.py, punct_vi.py # Các module ASR, MT, Dấu câu
-│   │   └── pipeline.py                # Translator E2E
-│   └── assets/                        # Dữ liệu từ điển phát âm & style
-├── components/                        # Mã nguồn exporter NPU của các nhánh
-├── models/                            # Cấu hình nạp graph (models.cpu.json)
-├── build/                             # Các đồ thị ONNX đã được xuất và tối ưu
-├── reports/                           # Các file Báo cáo PDF & tài liệu thực nghiệm
-│   ├── bao-cao-format-tts-hybrid.pdf
-│   ├── bao-cao-tts-anh-viet-3-phuong-phap.pdf
-│   ├── bao-cao-fix-normalize-anh-viet.pdf
-│   ├── bao_cao_danh_gia_audio_en_vi.pdf
-│   └── results_hybrid_format/
-├── research/                          # Bộ công cụ benchmark FST, CRF & ReportLab
-│   └── tts_format_benchmark/
-├── tests/                             # Bộ kiểm thử tự động
-│   ├── test_hybrid_format.py          # 10 test suites kiểm thử hybrid format
-│   └── tests_identifiers.py           # 5 test suites kiểm thử identifiers
-├── tools/                             # Công cụ chạy E2E, web server & sinh báo cáo
-│   ├── run_e2e.py                     # CLI chạy dịch audio E2E
-│   ├── s2s_web.py                     # Web interface chạy cục bộ
-│   └── create_hybrid_tts_report.py    # Script tái sinh báo cáo PDF
-└── web/                               # Giao diện web
+Chuỗi xử lý dữ liệu âm thanh toàn trình (End-to-End Pipeline) của **AuraTranslate Edge**:
+
+```mermaid
+flowchart TD
+    subgraph Audio_Capture ["1. Thu nhận & Phân đoạn"]
+        A["Micro USB / WAV Input (16kHz Mono)"] --> B["Adaptive Energy VAD (host, numpy)"]
+        B --> C["Cắt đoạn tiếng nói (≤ 14.5s)"]
+    end
+
+    subgraph ASR_Stage ["2. Nhận dạng giọng nói (ASR NPU)"]
+        C -->|Tiếng Việt| D1["asr_vi: Zipformer-150M CTC (FP16, 15s window)"]
+        C -->|Anh / Trung / Hàn| D2["asr_xx_frontend + asr_xx_encoder: SenseVoice-Small (W8A16, 29s window)"]
+    end
+
+    subgraph Text_Prep ["3. Chuẩn hoá & Phục hồi dấu câu"]
+        D1 --> E["punct_vi / vi_capu: Phục hồi dấu chấm, phẩy & chữ hoa"]
+        D2 --> E2["textnorm.py: Chuẩn hoá ký tự & thực thể số"]
+        E --> F["SentencePiece Tokenizer (Vocabulary 139k)"]
+        E2 --> F
+    end
+
+    subgraph MT_Stage ["4. Dịch máy đa ngữ (MT NPU)"]
+        F --> G["mt_enc: NLLB-200-600M Encoder (FP16, static 64 tokens)"]
+        G --> H{"Giải mã tuần tự (Host Loop)"}
+        H -->|Chế độ Nhanh| I1["mt_dec: Greedy Step Decoder (15.2 ms/step)"]
+        H -->|Chế độ Chuẩn| I2["mt_decB: 4-Beam Step Decoder (30.8 ms/step)"]
+        I1 --> J["Detokenizer & Chuẩn hoá số sang chữ"]
+        I2 --> J
+    end
+
+    subgraph TTS_Stage ["5. Tổng hợp giọng nói (TTS NPU)"]
+        J -->|Tiếng Việt| K1["tts_vi: Piper vais1000 (VITS byte-level, ≤ 26 từ/chunk)"]
+        J -->|Tiếng Trung| K2["tts_zh: MeloTTS-ZH (Static G2P Table + BERT, ≤ 20 ký tự/chunk)"]
+        J -->|Tiếng Anh / Hàn| K3["tts_enko: Supertonic-3 (Flow-Matching 5-ODE, ≤ 82 ký tự/chunk)"]
+    end
+
+    subgraph Audio_Play ["6. Phát âm thanh"]
+        K1 --> L["Loa USB / Output WAV"]
+        K2 --> L
+        K3 --> L
+    end
 ```
 
+### Chi tiết 9 đồ thị mô hình chạy trên Qualcomm Hexagon NPU v73
+
+Dưới đây là bảng số liệu đo kiểm thực tế từ Qualcomm AI Hub trên chip **Qualcomm QCS8550 (HSPTEK AIBOX 8550)** với QAIRT 2.51:
+
+| Mô hình / Đồ thị | Vai trò trong chuỗi | Độ dài cửa sổ / Giới hạn | Định dạng NPU | Thời gian chip QCS8550 | Đánh giá độ chính xác (Quality Metric) |
+|---|---|---|:---:|:---:|---|
+| **`asr_vi`** | ASR Tiếng Việt (Zipformer-150M CTC) | 15 giây âm thanh | FP16 | **163.4 ms** | WER: clean 7.5%, 5 dB 9.5%, 0 dB 6.2% |
+| **`asr_xx_frontend`** | Tiền xử lý fbank SenseVoice (EN/ZH/KO) | 29 giây âm thanh | FP16 | **58.3 ms** | Khớp 100% đầu ra fbank CPU |
+| **`asr_xx_encoder`** | ASR Đa ngữ (SenseVoice-Small) | 29 giây âm thanh | W8A16 | **236.5 ms** | CER: EN 4.8%, ZH 8.3%, KO 7.3% |
+| **`mt_enc`** | NLLB-200-600M Encoder | 64 token đầu vào | FP16 | **7.5 ms** | Cosine similarity $\ge 0.9999$ vs FP32 CPU |
+| **`mt_dec`** | NLLB Decoder Step (Chế độ nhanh) | 1 token/step (96 slots) | W8A16 | **15.2 ms / step** | 100% token khớp argmax với CPU Greedy |
+| **`mt_decB`** | NLLB Decoder Step (Chế độ chuẩn) | 4 beams/step | W8A16 | **30.8 ms / step** | Logit cosine $\ge 0.99999$, tăng +0.5…2.4 chrF |
+| **`tts_vi`** | TTS Tiếng Việt (Piper vais1000) | $\le 26$ từ / chunk | W8A16 | **520.1 ms** | VITS byte-level, âm sắc tự nhiên, không rác âm |
+| **`tts_zh`** | TTS Tiếng Trung (MeloTTS-ZH) | $\le 20$ ký tự / chunk | W8A16 | **740.6 ms** | ASR CER 6.4% trên 40 câu thử nghiệm |
+| **`tts_enko`** | TTS Tiếng Anh & Hàn (Supertonic-3) | $\le 82$ ký tự / chunk | W8A16 | **701.2 ms** | Round-trip WER: 0.0% (EN), CER: 1.5% (KO) |
+
+### Ước tính độ trễ chip toàn trình cho 1 câu nói ngắn (~25 token MT)
+
+$$\text{Tổng độ trễ chip} = \text{Thời gian ASR} + \text{Thời gian MT Encoder} + (N_{\text{steps}} \times \text{Thời gian MT Decoder}) + \text{Thời gian TTS}$$
+
+| Chiều dịch | ASR trên chip | MT trên chip (Greedy / Beam 4) | TTS trên chip (1 chunk) | Ước tính tổng thời gian chip |
+|:---:|:---:|:---:|:---:|:---:|
+| **VI $\rightarrow$ EN / KO** | 163 ms | $7.5 + (25 \times 15.2) \approx 387\text{ ms}$ (Greedy)<br>$7.5 + (25 \times 30.8) \approx 777\text{ ms}$ (Beam 4) | ~701 ms (Supertonic) | **~1.25 s (Greedy)**<br>**~1.64 s (Beam 4)** |
+| **VI $\rightarrow$ ZH** | 163 ms | 387 ms (Greedy) / 777 ms (Beam 4) | ~740 ms (MeloTTS) | **~1.29 s (Greedy)**<br>**~1.68 s (Beam 4)** |
+| **EN / KO / ZH $\rightarrow$ VI** | 295 ms (SenseVoice) | 387 ms (Greedy) / 777 ms (Beam 4) | ~520 ms (Piper) | **~1.20 s (Greedy)**<br>**~1.59 s (Beam 4)** |
+
 ---
 
-## 6. Hướng dẫn sử dụng & Chạy thử nghiệm
+## 4. Kết quả đánh giá chất lượng (Evaluation & Benchmarks)
 
-### 6.1. Chạy Unit Tests kiểm thử định dạng TTS
-Đảm bảo môi trường hoạt động chính xác bằng cách chạy 2 bộ kiểm thử độc lập:
+### 4.1. Chất lượng Dịch máy (MT FLORES-200 devtest, điểm chrF / BLEU)
+
+Đo kiểm bằng [`eval_mt.py`](s2s_edge/tools/eval_mt.py) trên 25 câu FLORES-200 cho mỗi chiều dịch:
+
+| Chiều dịch | S=32 Greedy | S=64 Greedy | S=64 Beam 4 (Bản chính thức) | HuggingFace FP32 Beam 4 (Tham chiếu) |
+|:---:|:---:|:---:|:---:|:---:|
+| **VI $\rightarrow$ EN** | 51.0 / 20.8 | 54.7 / 27.3 | **57.0 / 28.3** | 57.2 / 28.4 |
+| **EN $\rightarrow$ VI** | 54.2 / 32.5 | 55.9 / 35.5 | **56.4 / 36.5** | 55.8 / 35.6 |
+| **ZH $\rightarrow$ VI** | 40.4 / 15.3 | 46.5 / 23.7 | **47.7 / 25.4** | 46.8 / 24.1 |
+| **KO $\rightarrow$ VI** | 45.3 / 23.1 | 46.1 / 24.9 | **46.8 / 25.1** | — |
+
+*Đồ thị w8a16 trên chip tái tạo gần như hoàn hảo điểm chất lượng của mô hình FP32 gốc Meta AI.*
+
+### 4.2. Đánh giá chuỗi toàn trình Speech $\rightarrow$ Speech $\rightarrow$ ASR (`eval_e2e.py`)
+
+Kiểm định vòng lặp trên 8 đoạn âm thanh FLEURS mỗi chiều (Âm thanh nguồn $\rightarrow$ ASR $\rightarrow$ MT $\rightarrow$ TTS $\rightarrow$ ASR âm thanh đích đo chrF/BLEU):
+
+| Chiều dịch | ASR-chrF | ASR-BLEU | Lỗi ASR nguồn | Nhận xét thực nghiệm |
+|:---:|:---:|:---:|:---:|---|
+| **VI $\rightarrow$ EN** | **47.8** | **18.8** | WER 8.4% | Âm thanh tiếng Anh rõ ràng, chuẩn ngữ âm |
+| **EN $\rightarrow$ VI** | **46.9** | **21.0** | WER 11.3% | Piper phát âm tiếng Việt chuẩn thanh điệu, tự nhiên |
+| **ZH $\rightarrow$ VI** | **36.3** | **12.5** | CER 13.0% | Bản dịch mạch lạc, chuẩn danh từ chuyên ngành |
+| **KO $\rightarrow$ VI** | **43.7** | **14.6** | CER 7.1% | Độ chính xác cao, dịch đúng cấu trúc kính ngữ |
+
+### 4.3. Đánh giá trên tập dữ liệu mẫu của Ban Tổ Chức (BTC Sample Dataset)
+
+Đo kiểm bằng [`tools/eval_btc.py`](s2s_edge/tools/eval_btc.py) trên tập dữ liệu mẫu được lưu tại [`data/phase3_sample_dataset/`](data/phase3_sample_dataset/):
+- **Cặp Vie-Eng (100 câu):** ASR tiếng Việt đạt WER thấp (4–7%), Piper TTS phát âm hoàn chỉnh 100/100 câu không gặp lỗi Out-Of-Vocabulary.
+- **Cặp Vie-Kor & Vie-Man (180 câu):** Hệ thống đọc chính xác các mẫu câu hội thoại thường ngày và thuật ngữ kỹ thuật, độ trễ phản hồi tức thời.
+
+---
+
+## 5. Cấu trúc thư mục kho mã nguồn (Repository Layout)
+
+```
+AuraTranslateEdge-OneVoice/
+├── .gitignore                         # Quy tắc bỏ qua cache, audio thô và file nhị phân nặng
+├── requirements.txt                   # Thư viện Python tổng thể dự án
+├── README.md                          # Tài liệu kỹ thuật tổng quan (file hiện tại)
+│
+├── s2s_edge/                          # ENGINE TRIỂN KHAI EDGE CHÍNH THỨC (PHASE 3)
+│   ├── README.md                      # Chi tiết kiến trúc NPU Qualcomm Hexagon v73
+│   ├── requirements.txt               # Dependencies tối giản phục vụ chạy on-device (7 gói)
+│   ├── s2s_web.py                     # Giao diện Web Dashboard cục bộ thử nghiệm S2S
+│   ├── glossary.example.json          # File cấu hình thuật ngữ mẫu
+│   ├── glossary_enterprise.json       # Bảng thuật ngữ chuyên ngành công nghiệp & FDI
+│   ├── models.dev*.json               # Cấu hình đường dẫn model ONNX tham chiếu CPU
+│   ├── assets/                        # Dữ liệu tĩnh runtime (Tokenizers, Vocab, Styles)
+│   │   ├── nllb_spm.model             # SentencePiece model cho NLLB-200
+│   │   ├── zipformer_bpe.model        # BPE model cho Zipformer Vi
+│   │   ├── supertonic_styles.npz      # Style embeddings cho Supertonic-3 TTS
+│   │   ├── supertonic_unicode_indexer.json
+│   │   ├── piper_vi_words.txt         # Từ điển từ vựng Piper tiếng Việt
+│   │   └── vi_capu/                   # Từ điển khôi phục dấu câu & chữ hoa
+│   ├── docs/                          # Tài liệu kỹ thuật & báo cáo chuyên sâu Phase 3
+│   ├── eval/                          # Bộ dữ liệu chia tập đánh giá (`btc_split.json`)
+│   ├── models_relinked/               # Danh sách liên kết model QNN cho AIBOX 8550
+│   ├── s2s_edge/                      # Module mã nguồn thực thi chính
+│   │   ├── __main__.py                # CLI Entrypoint (lệnh 'file', 'live', 'inspect')
+│   │   ├── audio.py                   # I/O âm thanh, resampling và Adaptive Energy VAD
+│   │   ├── backends.py                # Wrapper trừu tượng hoá NPU (QNN) và CPU (ONNXRuntime)
+│   │   ├── asr.py                     # Wrapper Zipformer-150M và SenseVoice-Small
+│   │   ├── denoise.py                 # Mô-đun khử nhiễu GTCRN tuỳ chọn
+│   │   ├── punct_vi.py                # Phục hồi dấu câu & chữ hoa tiếng Việt
+│   │   ├── textnorm.py                # Chuẩn hoá số sang chữ & khôi phục dấu câu/ngắt câu
+│   │   ├── names.py                   # Xử lý phiên âm tên riêng ngoại lai
+│   │   ├── mt.py                      # Host decode loop cho NLLB (Greedy & 4-Beam)
+│   │   ├── tts.py                     # Wrapper Piper, MeloTTS và Supertonic-3
+│   │   ├── registry.py                # Bộ quản lý nạp đồ thị và warmup mô hình
+│   │   ├── conversation.py            # Quản lý phiên hội thoại song ngữ hai chiều
+│   │   ├── pipeline.py                # Lớp điều phối toàn trình S2S
+│   │   └── bench.py                   # Đo kiểm độ trễ & hiệu năng đầu-cuối
+│   └── tools/                         # Bộ công cụ vận hành thiết bị & kiểm thử
+│       ├── recon.sh                   # Khảo sát phần cứng, driver, NPU trên AIBOX 8550
+│       ├── session0.sh                # Script tự động hoá kiểm tra lần đầu trên thiết bị
+│       ├── golden.py                  # Kiểm chứng sai số NPU vs CPU parity
+│       ├── eval_btc.py                # Đánh giá chất lượng trên tập dữ liệu mẫu BTC
+│       ├── eval_vi_punct.py           # Kiểm thử độ chính xác phục hồi dấu câu tiếng Việt
+│       ├── run_btc.sh                 # Kịch bản chạy toàn bộ tập BTC và đóng gói log
+│       └── thermal_soak.py            # Kiểm tra độ ổn định nhiệt độ & quá nhiệt
+│
+├── data/                              # DỮ LIỆU ĐO KIỂM & TẬP MẪU
+│   ├── phase3_sample_dataset/         # Tập dữ liệu mẫu Phase 3 của BTC (Vie-Eng, Vie-Kor, Vie-Man)
+│   ├── asr/                           # Dữ liệu đối chứng ASR theo ngôn ngữ
+│   ├── asr_mixed/                     # Dữ liệu ASR trộn nhiễu nhiều mức SNR
+│   ├── clean/                         # Mẫu âm thanh sạch chuẩn hoá
+│   ├── mt/                            # Dữ liệu đối chứng FLORES-200
+│   └── noise/                         # Tạp âm công nghiệp mô phỏng
+│
+├── docs/                              # TÀI LIỆU KỸ THUẬT & HỒ SƠ ĐỀ ÁN
+│
+├── src/                               # KHO NGHIÊN CỨU & MÔ-ĐUN HOÁ BAN ĐẦU
+│   ├── step1_asr/                     # Thử nghiệm Zipformer & SenseVoice FP32
+│   ├── step2_mt/                      # Thử nghiệm NLLB CTranslate2 INT8
+│   ├── step3_tts/                     # Thử nghiệm Piper, Supertonic, MeloTTS
+│   ├── step4_quantization/            # Xuất đồ thị NPU & Thử nghiệm Qualcomm AI Hub
+│   └── step5_pipeline/                # Pipeline kết nối CPU ban đầu
+│
+├── third_party/                       # MÃ NGUỒN & TRỌNG SỐ BÊN THỨ BA
+│   ├── gtcrn/                         # Mô hình lọc nhiễu giọng nói GTCRN ONNX
+│   └── zipformer/                     # Trọng số tham chiếu Zipformer-30M / 150M
+│
+└── outputs/                           # Log kết quả, báo cáo đo đạc và kết quả kiểm thử
+```
+
+---
+
+## 6. Hướng dẫn cài đặt & Thực thi (Quick Start Guide)
+
+### 6.1. Chạy thử nghiệm trên máy tính cá nhân (CPU Reference Mode)
+
+Phù hợp cho lập trình viên phát triển tính năng mới, kiểm thử prompt dấu câu, hoặc kiểm tra logic dịch thuật trước khi nạp lên NPU.
+
 ```bash
-# Kiểm tra hybrid text normalization (10 test suites)
-PYTHONPATH=s2s_edge python3 -m unittest tests/test_hybrid_format.py
+# 1. Cài đặt môi trường Python 3.10 hoặc 3.11
+git clone https://github.com/LGKAI/AuraTranslateEdge-OneVoice.git
+cd AuraTranslateEdge-OneVoice
+pip install -r requirements.txt
 
-# Kiểm tra quy tắc bảo vệ thực thể identifiers (5 test suites)
-PYTHONPATH=s2s_edge python3 -m unittest tests/tests_identifiers.py
+# 2. Chuyển vào thư mục engine s2s_edge
+cd s2s_edge
+
+# 3. Dịch thử một file âm thanh có sẵn (Việt -> Anh)
+python -m s2s_edge file \
+    --src vi --tgt en \
+    --in samples/vi_0.wav \
+    --out out_en.wav \
+    --backend cpu \
+    --models models.dev.json
+
+# 4. Chạy chế độ hội thoại hai chiều trực tiếp qua micro laptop (Việt <-> Anh)
+python -m s2s_edge live \
+    --pair vi,en \
+    --backend cpu \
+    --models models.dev.json
 ```
 
-### 6.2. Chạy dịch Audio End-to-End (CLI)
-Để thực hiện dịch từ file âm thanh đầu vào ra file âm thanh đầu ra:
+### 6.2. Đánh giá chất lượng trên tập dữ liệu mẫu của BTC
+
 ```bash
-# Cú pháp: python3 tools/run_e2e.py <ngôn_ngữ_nguồn> <ngôn_ngữ_đích> [đường_dẫn_file_wav]
+cd s2s_edge
 
-# Ví dụ 1: Dịch từ Tiếng Anh sang Tiếng Việt
-python3 tools/run_e2e.py en vi path/to/input_en.wav
-
-# Ví dụ 2: Dịch từ Tiếng Việt sang Tiếng Anh
-python3 tools/run_e2e.py vi en path/to/input_vi.wav
-
-# Ví dụ 3: Dịch từ Tiếng Việt sang Tiếng Hàn
-python3 tools/run_e2e.py vi ko path/to/input_vi.wav
+# Chạy đánh giá trên 10 câu mẫu cặp Việt - Anh
+python tools/eval_btc.py \
+    --data ../data/phase3_sample_dataset \
+    --models models.dev.json \
+    --backend cpu \
+    --dirs vi-en,en-vi \
+    --n 10 \
+    --out logs/eval_btc_sample.json
 ```
-Kết quả audio đầu ra sẽ được lưu tại `results/e2e/audio/<src>_to_<tgt>.wav` kèm file JSON trace đầy đủ thông tin thời gian xử lý từng chặng.
 
-### 6.3. Khởi chạy Giao diện Web Trực quan (Localhost)
-Hệ thống tích hợp sẵn web server để test âm thanh trực tiếp:
+### 6.3. Triển khai & Đo kiểm trên phần cứng thật (HSPTEK AIBOX 8550)
+
+Các bước thực hiện khi kết nối laptop với hộp AIBOX 8550 qua cáp USB Type-C:
+
 ```bash
-python3 tools/s2s_web.py
+# 1. Kết nối vào thiết bị qua ADB shell (hoặc SSH qua 192.168.1.100)
+adb shell
+cd /home/user/s2s_edge
+
+# 2. Khảo sát nhanh môi trường hệ điều hành, SoC, FastRPC và NPU
+bash tools/recon.sh
+
+# 3. Chạy quy trình kiểm định Session 0 tự động
+# (Tự động kiểm tra import QNN, kiểm chứng golden parity cho cả 9 đồ thị, chạy smoke test)
+bash tools/session0.sh
+
+# 4. Kiểm tra độ lệch chuẩn của các đồ thị NPU so với bản CPU
+python tools/golden.py check --models models_qcs8550/models.json --backend npu
+
+# 5. Chạy toàn bộ bài test dữ liệu BTC trên NPU và đóng gói log nộp bài
+bash tools/run_btc.sh /home/user/data/phase3_sample_dataset 0 models_qcs8550/models.json
 ```
-Mở trình duyệt truy cập `http://localhost:8766` (hoặc cổng hiển thị trong log) để tải file âm thanh hoặc thu âm trực tiếp và quan sát kết quả dịch tức thì.
 
-### 6.4. Tái tạo Báo cáo PDF Bất kỳ lúc nào
-Nếu muốn cập nhật số liệu hoặc tạo lại file PDF báo cáo:
-```bash
-python3 tools/create_hybrid_tts_report.py
-```
-File PDF sẽ được xuất thẳng vào thư mục `reports/bao-cao-format-tts-hybrid.pdf`.
+---
 
-## Tích hợp asr-improvement (13/11/2026)
+## 7. Đội ngũ phát triển (Team Profile — Gia Sư Đỉnh Cao)
 
-Đã fetch và tích hợp chọn lọc VAD, hậu xử lý dấu câu/viết hoa VI và ORT fallback từ commit `1e52318`; không thay weights ASR hoặc TTS hybrid. 22 nhóm test và 6 chiều S2S trước/sau đã chạy. Còn lỗi số liệu ASR/MT và tradeoff latency; xem [báo cáo tích hợp](reports/asr_integration/REVIEW.md). Với `S2S_NEURAL_TN=0`, đường VI là CAPU + vi_punct nâng cấp; chế độ neural nguồn cũ vẫn được giữ riêng.
+Dự án được thực hiện bởi nhóm sinh viên **Gia Sư Đỉnh Cao** tham dự **OneVoice AI Challenge 2026**:
+
+| Thành viên | Vai trò trong dự án | Trách nhiệm chính trong Phase 3 |
+|---|---|---|
+| **Trần Quốc Khanh** | **Team Lead & Quality Lead** | Trưởng nhóm; thiết kế kiến trúc `s2s_edge`, tối ưu hóa đồ thị NPU NLLB và Zipformer; phụ trách máy tính điều khiển chính (Lenovo LOQ) tại buổi đo on-device. |
+| **Lê Gia Khánh** | **OS & Hardware Lead** | Chịu trách nhiệm thiết lập hệ điều hành, kết nối ADB/mạng, giao tiếp âm thanh USB Audio trên AIBOX 8550; tác giả tài liệu `plan_os_hardware.tex`; máy tính phụ trợ (Lenovo LOQ fallback). |
+| **Phạm Chấn Khoa** | **Hardware Support & Business Analyst** | Hỗ trợ kết nối phần cứng, giám sát nguồn điện/nhiệt độ; cấu hình máy tính phụ (MacBook); chuẩn bị kịch bản demo giải pháp kinh doanh. |
+| **Trần Trung Hiếu** | **System & Latency Verification** | Đo đạc độ trễ từng chặng (TTFB, RTF); trực tiếp thao tác demo PTT (Push-To-Talk) và kiểm chứng tính ổn định của vocoder TTS trên chip. |
+| **Cái Hoàng Bảo Kin** | **Data & Video Director** | Quản lý tập dữ liệu đối chứng của BTC; phụ trách kịch bản ghi hình video minh chứng, quay phim tài liệu đo kiểm trực tiếp tại VNG Campus. |
+
+---
+
+## 8. Giấy phép & Điều khoản (License & Terms)
+
+- Toàn bộ mã nguồn do nhóm phát triển trong kho lưu trữ này được phát hành theo giấy phép **MIT License**.
+- Các mô hình thành phần và thư viện phụ thuộc tuân thủ giấy phép gốc:
+  - **Zipformer-150M-CR-CTC**: Apache 2.0 / CC-BY-NC-ND-4.0 (Nghiên cứu học thuật).
+  - **SenseVoice-Small**: Apache 2.0 (Alibaba FunASR).
+  - **NLLB-200**: CC-BY-NC-4.0 (Meta AI).
+  - **Piper TTS**: MIT License.
+  - **Supertonic-3**: Code MIT / Weights OpenRAIL-M.
+  - **MeloTTS**: MIT License.
+  - **Qualcomm QNN SDK / QAIRT**: Qualcomm Technologies, Inc. Proprietary License.

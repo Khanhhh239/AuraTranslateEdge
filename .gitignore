@@ -49,3 +49,18 @@ src/**/*.onnx
 src/**/*.onnx.json
 venv_pipeline/
 =*.*.*
+
+# From asr-speed-accuracy (AIBOX 8550 runtime)
+data/phase3_sample_dataset/
+*.onnx.data
+*.dlc
+third_party/zipformer/
+s2s_edge/models/
+s2s_edge/golden/
+s2s_edge/golden_13b/
+s2s_edge/golden_13b_b4/
+s2s_edge/logs/
+s2s_edge/samples/*.wav
+s2s_edge/eval/cpu_ref/
+# required static runtime assets stay tracked
+!s2s_edge/assets/**
