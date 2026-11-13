@@ -51,7 +51,7 @@ def main():
         tmp = os.path.join(DEPLOY, "SHA256SUMS.box"); open(tmp, "w", encoding="utf-8", newline="\n").writelines(lines); adb("push", tmp, f"{dest}/SHA256SUMS.box", quiet=True)
         out = adb("shell", f"cd {dest}/s2s_edge_pkg && sha256sum -c ../SHA256SUMS.box --quiet && echo CHECKSUM_OK", check=False, quiet=True)
         print(f"checksum ({len(lines)} files): " + ("OK" if "CHECKSUM_OK" in out else "FAILED\n" + out[-1500:]))
-    print(f"done in {time.time() - t0:.0f} s. Next:  adb shell  ->  log in to the account you were given (su - <account>)  ->  cd {dest}/s2s_edge_pkg && bash tools/start_box.sh")
+    print(f"done in {time.time() - t0:.0f} s. Next:  adb shell  ->  log in to the account you were given (su - <account>)  ->  cd {dest}/s2s_edge_pkg && bash start.sh demo   (or: bash start.sh box). Guide: HUONG_DAN_CHAY_BOX.md")
 
 
 if __name__ == "__main__":

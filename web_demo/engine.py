@@ -111,8 +111,96 @@ def _babble_wav(text, sr=16000):
     return buf.getvalue()
 
 
+def _find_s2s_root():
+    """Folder that contains the s2s_edge Python package: $S2S_PKG, the installed package folder (web_demo/ copied next to s2s_edge/),
+    or the repo layout (repo/s2s_edge/s2s_edge)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for c in (os.environ.get("S2S_PKG"), os.path.dirname(here), os.path.join(os.path.dirname(here), "s2s_edge")):
+        if c and os.path.isfile(os.path.join(c, "s2s_edge", "__init__.py")):
+            return os.path.abspath(c)
+    return None
+
+
+def _wav_to_f32(data):
+    """WAV bytes (any rate, mono/stereo, PCM16/PCM32/float) -> float32 mono at 16 kHz."""
+    import numpy as np
+    with wave.open(io.BytesIO(data)) as w:
+        sr, ch, sw, n = w.getframerate(), w.getnchannels(), w.getsampwidth(), w.getnframes(); raw = w.readframes(n)
+    if sw == 2: x = np.frombuffer(raw, np.int16).astype(np.float32) / 32768.0
+    elif sw == 4: x = np.frombuffer(raw, np.int32).astype(np.float32) / 2147483648.0
+    elif sw == 1: x = (np.frombuffer(raw, np.uint8).astype(np.float32) - 128.0) / 128.0
+    else: raise ValueError(f"unsupported WAV sample width {sw}")
+    if ch > 1: x = x.reshape(-1, ch).mean(axis=1)
+    if sr != 16000:
+        from math import gcd
+        from scipy.signal import resample_poly
+        g = gcd(sr, 16000); x = resample_poly(x, 16000 // g, sr // g).astype(np.float32)
+    return x
+
+
+def _f32_to_wav(x, sr):
+    import numpy as np
+    pcm = (np.clip(np.asarray(x, np.float32), -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(int(sr)); w.writeframes(pcm)
+    return buf.getvalue()
+
+
+class S2SEngine:
+    """The real pipeline (s2s_edge): NPU on the AIBOX 8550 (backend npu), ONNX on a laptop (backend cpu, needs the ONNX exports).
+    Same code path as the CLI / box web UI: VAD segments -> ASR -> junk filter (clean_asr) -> Vietnamese punctuation -> MT (3.3B / 600M route,
+    sentence by sentence, output guard, names, Korean politeness) -> TTS."""
+
+    def __init__(self, models=None, backend=None):
+        import sys
+        root = _find_s2s_root()
+        if root is None: raise RuntimeError("s2s_edge package not found: set S2S_PKG=<folder that contains s2s_edge/>")
+        if root not in sys.path: sys.path.insert(0, root)
+        from s2s_edge.registry import Registry
+        from s2s_edge.conversation import Engine
+        self.backend = backend or os.environ.get("S2S_BACKEND", "npu")
+        models = models or os.environ.get("S2S_MODELS") or _default_models(root)
+        self.reg = Registry(models, self.backend); self.e = Engine(self.reg); self.root, self.models = root, models
+        self.name = f"s2s_edge · {self.backend.upper()}"
+        if os.environ.get("S2S_WARMUP", "1") != "0":                     # load every graph once so the first request is not 1-2 min
+            self.reg.warmup([p for p in PAIRS], log=lambda m: print("[warmup]", m, flush=True))
+        st = self.e.mt.status() if hasattr(self.e.mt, "status") else {}
+        if st: self.name += " · MT " + ("3.3B+600M" if st.get("big_in_use") else "600M") + (" (DEGRADED)" if st.get("degraded") else "")
+        self.info = dict(root=root, models=os.path.abspath(models), backend=self.backend, mt=st)
+
+    def asr(self, wav, lang):
+        from s2s_edge.audio import segment_with_breaks
+        from s2s_edge.asr_clean import clean_asr
+        x = _wav_to_f32(wav); a = self.e.asr(lang); out = []
+        for (s, t), brk in segment_with_breaks(x, max_s=getattr(a, "max_s", None), vad_profile=self.reg.vad_profile):
+            seg = self.e.prep(x[s:t]); text, raw, we = self.e._asr_stage(seg, lang)
+            text, _ = clean_asr(text, lang)
+            if text: text, _ = self.e._punct_stage(text, lang, raw, we, brk, min_chars=1)
+            if text: out.append(text)
+        return ("" if lang == "zh" else " ").join(out)
+
+    def mt(self, text, src, tgt):
+        return self.e.translate_text(text, src, tgt) if text.strip() else ""
+
+    def tts(self, text, lang):
+        if not text.strip(): return _f32_to_wav([], 16000)
+        wav, sr = self.e.tts(lang).synthesize(text)
+        return _f32_to_wav(wav, sr)
+
+
+def _default_models(root):
+    """The model set tools/session0.sh validated (logs/models_ok.txt), else models_qcs8550/models.json (3.3B route + 600M)."""
+    ok = os.path.join(root, "logs", "models_ok.txt")
+    if os.path.isfile(ok):
+        p = open(ok, encoding="utf-8").read().strip()
+        if p: return p if os.path.isabs(p) else os.path.join(root, p)
+    return os.path.join(root, "models_qcs8550", "models.json")
+
+
 def get_engine():
-    """Return the engine the server uses. Swap MockEngine for the real one here."""
-    if os.environ.get("S2S_ENGINE", "mock") == "mock":
+    """S2S_ENGINE=real (default when the s2s_edge package is found) -> S2SEngine; S2S_ENGINE=mock -> MockEngine (UI work without models)."""
+    want = os.environ.get("S2S_ENGINE", "real" if _find_s2s_root() else "mock").lower()
+    if want == "mock":
         return MockEngine()
-    raise RuntimeError("Real engine not wired yet: implement it in web_demo/engine.py")
+    return S2SEngine()

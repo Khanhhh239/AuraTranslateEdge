@@ -12,7 +12,7 @@ Other:   --wav some.wav    send an existing file instead of recording (also work
 Needs on the laptop: pip install sounddevice soundfile numpy ; adb in PATH.
 Timing printed: what the BOX measured per stage (the number to report) and the laptop<->box round trip (adb transfer, reported separately)."""
 import argparse, base64, io, json, os, shutil, subprocess, sys, time, urllib.request
-ADB = shutil.which("adb") or r"C:\platform-toolsdb.exe"
+ADB = shutil.which("adb") or r"C:\platform-tools\adb.exe"
 import numpy as np
 
 PKG = "/root/onevoice/s2s_edge_pkg"

@@ -12,6 +12,9 @@ Endpoints
             {"stage":"tts","audio":<base64 wav>,"ms":...}
             {"stage":"done","total_ms":...,"input_sec":...}
             {"stage":"error","message":...}   (on failure)
+    POST /api/text?src=vi&tgt=en             body = {"text": "..."} (UTF-8 JSON): the (edited) source text -> MT -> TTS, same NDJSON events
+                                             without the asr stage. Used by the "Sửa" button to fix an ASR error and translate again.
+Engine: S2S_ENGINE=real (default when the s2s_edge package is next to web_demo/ or in the repo) | mock. See engine.py / README.md.
 """
 import argparse
 import base64
@@ -30,7 +33,11 @@ from engine import LANGS, PAIRS, get_engine
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 MAX_BODY = 30 * 1024 * 1024
-ENGINE = get_engine()
+try:
+    ENGINE = get_engine()
+except Exception as _e:                                    # a demo must not silently fall back to fake output: say what is wrong and stop
+    traceback.print_exc()
+    raise SystemExit(f"!! engine could not start: {_e!r} \n   (UI work without models: S2S_ENGINE=mock python web_demo/server.py)")
 LOCK = threading.Lock()  # models are usually not thread-safe; serialize requests
 
 
@@ -59,11 +66,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/api/health":
-            return self._json(200, {"engine": ENGINE.name, "langs": list(LANGS), "pairs": [list(p) for p in PAIRS]})
+            return self._json(200, {"engine": ENGINE.name, "langs": list(LANGS), "pairs": [list(p) for p in PAIRS], "info": getattr(ENGINE, "info", {})})
         if path == "/":
             path = "/index.html"
         fp = os.path.normpath(os.path.join(STATIC, path.lstrip("/")))
-        if not fp.startswith(STATIC) or not os.path.isfile(fp):
+        if os.path.commonpath([fp, STATIC]) != STATIC or not os.path.isfile(fp):           # no "../" and no sibling folder such as static2/
             return self._json(404, {"error": "not found"})
         with open(fp, "rb") as f:
             data = f.read()
@@ -79,7 +86,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         url = urlparse(self.path)
-        if url.path != "/api/translate":
+        if url.path not in ("/api/translate", "/api/text"):
             return self._json(404, {"error": "not found"})
         q = parse_qs(url.query)
         src, tgt = q.get("src", [""])[0], q.get("tgt", [""])[0]
@@ -88,7 +95,18 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         if n <= 0 or n > MAX_BODY:
             return self._json(400, {"error": "empty or too large body"})
-        audio = self.rfile.read(n)
+        body = self.rfile.read(n)
+        if url.path == "/api/text":
+            try:
+                text = str(json.loads(body.decode("utf-8")).get("text", "")).strip()[:2000]
+            except Exception:
+                return self._json(400, {"error": "body must be JSON {\"text\": ...}"})
+            if not text:
+                return self._json(400, {"error": "empty text"})
+            return self._stream(src, tgt, text=text)
+        return self._stream(src, tgt, audio=body)
+
+    def _stream(self, src, tgt, audio=None, text=None):
 
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson")
@@ -102,9 +120,10 @@ class Handler(BaseHTTPRequestHandler):
         t0 = time.perf_counter()
         try:
             with LOCK:
-                t = time.perf_counter()
-                text = ENGINE.asr(audio, src)
-                emit({"stage": "asr", "text": text, "ms": round((time.perf_counter() - t) * 1000)})
+                if audio is not None:
+                    t = time.perf_counter()
+                    text = ENGINE.asr(audio, src)
+                    emit({"stage": "asr", "text": text, "ms": round((time.perf_counter() - t) * 1000)})
 
                 t = time.perf_counter()
                 out = ENGINE.mt(text, src, tgt)
@@ -116,7 +135,7 @@ class Handler(BaseHTTPRequestHandler):
                       "ms": round((time.perf_counter() - t) * 1000)})
 
             emit({"stage": "done", "total_ms": round((time.perf_counter() - t0) * 1000),
-                  "input_sec": wav_seconds(audio)})
+                  "input_sec": wav_seconds(audio) if audio is not None else None})
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as e:

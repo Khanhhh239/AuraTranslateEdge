@@ -283,3 +283,10 @@ kbd {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+/* edit ASR text and translate again */
+.a-edit .i-ok { display: none; }
+.turn.editing .a-edit .i-edit { display: none; }
+.turn.editing .a-edit .i-ok { display: inline; }
+.turn.editing .src-text { outline: 2px dashed var(--accent, #6d5dfc); outline-offset: 4px; border-radius: 6px; cursor: text; }
+.turn .edited-note { display: block; font-size: 12px; opacity: .6; margin-top: 2px; }

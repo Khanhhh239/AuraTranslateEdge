@@ -9,6 +9,9 @@ $$\text{Tiếng Việt (VI)} \longleftrightarrow \text{Tiếng Anh (EN)} \;\big|
 
 Dự án được đồng thiết kế (hardware-software co-design) bởi đội ngũ **Gia Sư Đỉnh Cao** cho cuộc thi **OneVoice AI Challenge 2026** (do **Saigon AI Hub × Qualcomm** tổ chức), hướng tới giải quyết bài toán giao tiếp thời gian thực không độ trễ, bảo mật tuyệt đối tại các nhà máy sản xuất FDI, khu công nghiệp và môi trường thương mại song phương.
 
+> [!IMPORTANT]
+> **Chạy trên AIBOX 8550 (bản gộp ASR + TTS + phần chạy trên hộp + web demo): [`s2s_edge/HUONG_DAN_CHAY_BOX.md`](s2s_edge/HUONG_DAN_CHAY_BOX.md)**. Trên hộp chỉ cần một lệnh: `bash start.sh demo`.
+
 ---
 
 ## 1. Hiện trạng kỹ thuật & Điểm đột phá cốt lõi (Key Technical Differentiators)

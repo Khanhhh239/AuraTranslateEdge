@@ -28,6 +28,8 @@ fi
 . .venv/bin/activate
 python -m pip --version
 python -m pip install --no-index --find-links "$WH" -r requirements.txt openpyxl
+# optional extras: a missing wheel only disables a feature (python-crfsuite -> identifier CRF of the hybrid TTS normalizer)
+for opt in python-crfsuite; do python -m pip install --no-index --find-links "$WH" "$opt" >/dev/null 2>&1 && echo "optional $opt installed" || echo "optional $opt not in $WH: feature disabled (OK)"; done
 python -m pip install --no-index --find-links "$WH" qai_appbuilder || { echo "qai_appbuilder wheel rejected (glibc $GLIBC too old?). See tools/docker_run.sh"; exit 3; }
 . tools/env.sh 2>/dev/null   # libatomic fallback + bundled QAIRT 2.51 libs, needed to import qai_appbuilder
 python -c "import numpy, scipy, soundfile, sentencepiece, kaldi_native_fbank, onnxruntime, jiwer, sacrebleu, openpyxl, qai_appbuilder, os; print('imports OK; qai_appbuilder', os.path.dirname(qai_appbuilder.__file__))"

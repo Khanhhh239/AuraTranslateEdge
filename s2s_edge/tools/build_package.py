@@ -75,12 +75,16 @@ def main():
     os.makedirs(out)
     for d in ("s2s_edge", "assets", "tools", "golden", "samples"):
         if os.path.isdir(os.path.join(HERE, d)): shutil.copytree(os.path.join(HERE, d), os.path.join(out, d), ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    for f in ("README.md", "requirements.txt"): shutil.copy(os.path.join(HERE, f), out)
-    open(os.path.join(out, "install.sh"), "w", newline="\n").write(INSTALL); open(os.path.join(out, "run_demo.sh"), "w", newline="\n").write(RUN)
+    for f in ("README.md", "requirements.txt", "glossary_enterprise.json"): shutil.copy(os.path.join(HERE, f), out)
+    for f, tmpl in (("install.sh", INSTALL), ("run_demo.sh", RUN)):          # the tracked scripts (tested on the box) win over the old templates
+        src = os.path.join(HERE, f); txt = open(src, encoding="utf-8").read() if os.path.isfile(src) else tmpl
+        open(os.path.join(out, f), "w", newline="\n").write(txt)
+    for d in ("docs", "tests", "eval", "models_qcs8550"):                     # docs/tests, eval sets, NPU model-set configs (.bin files: --models-dir or tools/sync_package.py)
+        if os.path.isdir(os.path.join(HERE, d)): shutil.copytree(os.path.join(HERE, d), os.path.join(out, d), dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.bin"))
     if a.wheelhouse and os.path.isdir(a.wheelhouse): shutil.copytree(a.wheelhouse, os.path.join(out, "wheelhouse"))
     if a.wheelhouse310 and os.path.isdir(a.wheelhouse310): shutil.copytree(a.wheelhouse310, os.path.join(out, "wheelhouse_cp310"))
     if a.eval_dir:                                              # small evaluation subset (FLEURS test audio + FLORES references) for judges
-        os.makedirs(os.path.join(out, "eval"))
+        os.makedirs(os.path.join(out, "eval"), exist_ok=True)
         for l in ("vi", "en", "zh", "ko"):
             man = json.load(open(os.path.join(a.eval_dir, f"manifest_{l}.json"), encoding="utf-8"))[: a.eval_n]; os.makedirs(os.path.join(out, "eval", l), exist_ok=True)
             for it in man: shutil.copy(os.path.join(a.eval_dir, it["path"]), os.path.join(out, "eval", l, os.path.basename(it["path"]))); it["path"] = f"{l}/" + os.path.basename(it["path"])

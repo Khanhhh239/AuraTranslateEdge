@@ -252,7 +252,7 @@
   }
   function hideStages() { stagesEl.classList.remove("show"); }
   function stageActive(k) { stageLis[k].className = "active"; }
-  function stageDone(k, ms) { stageLis[k].className = "done"; stageLis[k].querySelector(".st-ms").textContent = ms + " ms"; }
+  function stageDone(k, ms) { stageLis[k].className = "done"; stageLis[k].querySelector(".st-ms").textContent = typeof ms === "number" ? ms + " ms" : ms; }
 
   // ---------- turns ----------
   let turnCount = 0;
@@ -267,6 +267,8 @@
     const inBtn = el.querySelector(".play-in");
     setDuration(inBtn, origUrl);
     inBtn.addEventListener("click", () => player.toggle(inBtn, origUrl));
+    el.dataset.src = src; el.dataset.tgt = tgt;
+    wireEdit(el);
     feed.appendChild(el);
     turnCount++;
     requestAnimationFrame(() => el.scrollIntoView({ behavior: "smooth", block: "end" }));
@@ -300,6 +302,64 @@
     player.btn.querySelector(".bar-fill").style.width = (a.currentTime / a.duration) * 100 + "%";
   });
 
+  // ---------- edit the recognised text, translate again (POST /api/text) ----------
+  function wireEdit(turn) {
+    const btn = turn.querySelector(".a-edit"), p = turn.querySelector(".src-text");
+    const start = () => {
+      turn.classList.add("editing"); p.contentEditable = "plaintext-only";
+      if (p.contentEditable !== "plaintext-only") p.contentEditable = "true";
+      p.focus(); const r = document.createRange(); r.selectNodeContents(p); r.collapse(false); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
+      statusEl.textContent = "Sửa chữ rồi bấm Enter hoặc ✓ để dịch lại (Esc: huỷ)";
+    };
+    const stop = () => { turn.classList.remove("editing"); p.contentEditable = "false"; };
+    btn.addEventListener("click", () => (turn.classList.contains("editing") ? retranslate(turn) : (p.dataset.orig = p.textContent, start())));
+    p.addEventListener("keydown", (e) => {
+      if (!turn.classList.contains("editing")) return;
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); retranslate(turn); }
+      else if (e.key === "Escape") { e.preventDefault(); p.textContent = p.dataset.orig || p.textContent; stop(); statusEl.textContent = "Sẵn sàng"; }
+      e.stopPropagation();                                                     // Space must not start push-to-talk while typing
+    });
+    p.addEventListener("keyup", (e) => { if (turn.classList.contains("editing")) e.stopPropagation(); });
+    turn._stopEdit = stop;
+  }
+
+  async function readEvents(res, onEvent) {
+    if (!res.ok || !res.body) { let m = "Server trả lỗi " + res.status; try { m += ": " + (await res.json()).error; } catch {} throw new Error(m); }
+    const reader = res.body.getReader(), dec = new TextDecoder(); let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read(); if (done) break;
+      buf += dec.decode(value, { stream: true }); let i;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+        if (line) { const ev = JSON.parse(line); if (ev.stage === "error") throw new Error(ev.message); onEvent(ev); }
+      }
+    }
+  }
+
+  async function retranslate(turn) {
+    if (state !== "idle") return toast("Đang bận, chờ lượt hiện tại xong");
+    const p = turn.querySelector(".src-text"), text = p.textContent.trim(), src = turn.dataset.src, tgt = turn.dataset.tgt;
+    turn._stopEdit();
+    if (!text) return toast("Chữ trống");
+    setState("busy"); resetStages(); stageDone("asr", "sửa tay"); stageActive("mt"); statusEl.textContent = "Đang dịch lại…";
+    const out = turn.querySelector(".tgt-text"); out.innerHTML = '<span class="skel"></span>'; turn.classList.remove("error");
+    const pb = turn.querySelector(".play-out"); pb.disabled = true;
+    try {
+      const res = await fetch(`/api/text?src=${src}&tgt=${tgt}`, { method: "POST", body: JSON.stringify({ text }), headers: { "Content-Type": "application/json" } });
+      await readEvents(res, (ev) => {
+        if (ev.stage === "mt") { setText(turn, ".tgt-text", ev.text, tgt); turn._translated = ev.text; stageDone("mt", ev.ms); stageActive("tts"); }
+        else if (ev.stage === "tts") { stageDone("tts", ev.ms); attachAudio(turn, ev.audio); }
+        else if (ev.stage === "done") { turn.querySelector(".m-lat").textContent = (ev.total_ms / 1000).toFixed(2) + " s (sửa)"; }
+      });
+      if (!p.querySelector(".edited-note")) { const n = document.createElement("small"); n.className = "edited-note"; n.textContent = "đã sửa tay"; p.after(n); }
+    } catch (e) {
+      out.textContent = "Không dịch được. " + (e.message || ""); turn.classList.add("error"); toast("Lỗi: " + (e.message || "không rõ"));
+      for (const li of Object.values(stageLis)) if (li.className === "active") li.className = "";
+    }
+    setState("idle"); statusEl.textContent = "Sẵn sàng";
+    setTimeout(() => { if (state === "idle") hideStages(); }, 3500);
+  }
+
   // ---------- pipeline call ----------
   async function run(wavBlob) {
     const [src, tgt] = pair0();
@@ -324,7 +384,7 @@
           const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
           if (!line) continue;
           const ev = JSON.parse(line);
-          if (ev.stage === "asr") { setText(turn, ".src-text", ev.text, src); stageDone("asr", ev.ms); stageActive("mt"); }
+          if (ev.stage === "asr") { setText(turn, ".src-text", ev.text, src); stageDone("asr", ev.ms); stageActive("mt"); turn.querySelector(".a-edit").disabled = false; }
           else if (ev.stage === "mt") { translated = ev.text; setText(turn, ".tgt-text", ev.text, tgt); stageDone("mt", ev.ms); stageActive("tts"); turn.querySelector(".a-copy").disabled = false; }
           else if (ev.stage === "tts") { stageDone("tts", ev.ms); attachAudio(turn, ev.audio); }
           else if (ev.stage === "done") { turn.querySelector(".m-lat").textContent = (ev.total_ms / 1000).toFixed(2) + " s"; }
@@ -343,7 +403,7 @@
     setTimeout(() => { if (state === "idle") hideStages(); }, 3500);
 
     turn.querySelector(".a-copy").onclick = async (ev) => {
-      try { await navigator.clipboard.writeText(translated); const b = ev.currentTarget; b.classList.add("done"); setTimeout(() => b.classList.remove("done"), 1200); toast("Đã sao chép"); }
+      try { await navigator.clipboard.writeText(turn._translated || translated); const b = ev.currentTarget; b.classList.add("done"); setTimeout(() => b.classList.remove("done"), 1200); toast("Đã sao chép"); }
       catch { toast("Không sao chép được"); }
     };
   }
