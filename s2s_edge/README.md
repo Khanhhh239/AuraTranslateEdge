@@ -1,12 +1,12 @@
-# s2s_edge — offline speech-to-speech translation (vi ⇄ en / zh / ko) for Qualcomm Dragonwing IQ-9075
+# s2s_edge — offline speech-to-speech translation (vi ⇄ en / zh / ko) for the HSPTEK AIBOX 8550 (QCS8550, Hexagon v73)
 
 OneVoice AI Challenge 2026, Phase 3 prototype. Audio in → translated audio out, **all inference on the device, no network**.
 Six directions: vi→en, vi→zh, vi→ko, en→vi, zh→vi, ko→vi (one side is always Vietnamese).
 
-> **Status (be honest):** the pipeline code runs end to end on a CPU reference backend (ONNX Runtime). Every model graph has been compiled for
-> the IQ-9075 NPU through Qualcomm AI Hub and measured there (see `docs/`), but the **NPU backend on a real device is not completed yet** — it is
-> finished in the first device session (`tools/recon.sh` tells us which runtime is installed). Nothing in this README claims on-device numbers
-> that have not been measured.
+> **Status (be honest):** end to end on a CPU reference backend (ONNX Runtime) and on Qualcomm AI Hub's virtual QCS8550 (every graph compiled, linked for QAIRT 2.51, run and compared with
+> the CPU outputs). **Not yet run on the physical box**: the first device session (`bash tools/vng_run_all.sh`) does that. No on-device number is claimed before it is measured.
+>
+> **How to run and what each file does: `docs/HUONG_DAN.md`** (Vietnamese). Quality work summary: `docs/quality_improvements_summary.md`.
 
 ## Pipeline
 
@@ -34,6 +34,7 @@ cheap work: audio I/O, VAD, fbank, CTC collapse, SentencePiece, the NLLB greedy 
 
 ```bash
 pip install -r requirements.txt
+# NOTE: the CPU reference needs the ONNX exports, which are NOT in this package (it only carries NPU context binaries)
 cp models.dev.json models/models.json          # edit the paths to your ONNX files
 python -m s2s_edge file --src vi --tgt en --in samples/vi_0.wav --out out.wav --backend cpu --models models/models.json
 python -m s2s_edge live --src vi --tgt zh --backend cpu --models models/models.json     # press Enter, speak, hear the translation
@@ -64,17 +65,7 @@ python -m s2s_edge.bench --src vi --tgt en --manifest eval/manifest_vi.json --ru
 
 ## Files
 
-| Path | Purpose |
-|---|---|
-| `s2s_edge/` | package: `audio` (I/O, VAD), `asr`, `mt`, `tts`, `textnorm`, `backends` (ONNX Runtime, QNN), `registry`, `pipeline`, `bench`, `__main__` (CLI) |
-| `tools/recon.sh` | one-shot device survey (OS, SoC, QNN libs, audio devices, network) |
-| `tools/session0.sh` | everything to run first in a device session, logs packed to a .tgz |
-| `tools/golden.py` | make / check golden input-output pairs for every graph |
-| `tools/eval_e2e.py` | speech → speech → ASR of the output vs FLORES reference (ASR-chrF / BLEU) for the six directions |
-| `tools/lid_features.py` | features used to fit the vi / not-vi language identification |
-| `tools/eval_mt.py` | FLORES-200 translation quality (chrF / BLEU) for all six directions |
-| `assets/` | SentencePiece models, NLLB language ids, Supertonic unicode table + voice styles |
-| `models.dev*.json` | development model maps (CPU ONNX paths) |
+See `docs/HUONG_DAN.md` for the full map. Main parts: `s2s_edge/` (package: audio, asr, punct_vi, mt, tts, textnorm, names, conversation, backends, registry, CLI with `file | live | serve`), `tools/` (`vng_run_all.sh`, `recon.sh`, `session0.sh`, `run_btc.sh` + `eval_btc.py`, `run_adv.sh` + `eval_adv.py`, `box_serve.sh` + `laptop_ptt.py`, `golden.py`, research scripts), `assets/`, `golden/`, `eval/`, `samples/`, `docs/`.
 
 ## Known limits
 
@@ -84,4 +75,4 @@ python -m s2s_edge.bench --src vi --tgt en --manifest eval/manifest_vi.json --ru
 * One utterance segment is ≤ 14.5 s (Zipformer window); longer audio is split at the quietest frame.
 * The voice-activity detector is energy based and relative to the recording level (works with quiet microphones); it is not a neural VAD.
 * Several speakers talking at once, and Vietnamese speech containing English words, are not handled (see `docs/conversation.md`).
-* Models are compiled for Hexagon v73 (IQ-9075). They do **not** run on QCS6490 / RB3 Gen 2 (v68).
+* Models are compiled for Hexagon v73 (QCS8550, IQ-9075). They do **not** run on QCS6490 / RB3 Gen 2 (v68).

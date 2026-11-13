@@ -17,8 +17,8 @@ Cập nhật 11/11/2026. Pipeline: ASR (Zipformer tiếng Việt, SenseVoice en/
 
 | Thí nghiệm | Kết quả đến giờ |
 |---|---|
-| Chỉnh tham số giải mã MT (bộ dev 552 câu) | tắt hoặc nới chặn lặp 3-gram: +0,57 chrF trung bình, **vi→ko +3,1**; `length_penalty` gần như không đổi. Đang xác nhận trên holdout |
-| Chọn lại ứng viên của beam (noisy channel, dịch ngược) | đang đo mức trần; các ứng viên của beam 4 rất giống nhau nên kỳ vọng thấp |
+| Chỉnh tham số giải mã MT | **đã xong, giữ mặc định.** Trên dev, tắt chặn lặp cho +0,57 (vi→ko +3,1), nhưng holdout (368 câu) không xác nhận: 43,33 so với 43,39, vi→ko −0,5. `length_penalty` và giới hạn độ dài không đổi gì |
+| Chọn lại ứng viên của beam (noisy channel, dịch ngược) | **đã xong, không dùng.** Trên dev, noisy channel λ=1 tăng trung bình 44,13 lên 45,46, nhưng holdout (368 câu) không xác nhận: 43,39 so với 43,35 (λ=1) và 43,66 (λ=0,25); vi→ko giảm 4,3. Dịch ngược không đổi gì |
 
 ## 3. Đã thử và loại (có số)
 

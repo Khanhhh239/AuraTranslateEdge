@@ -6,6 +6,12 @@ import os, sys, time, json
 import numpy as np
 
 
+def _ort_session(path, so=None, providers=None):
+    """The REAL onnxruntime.InferenceSession. qai_appbuilder replaces the onnxruntime module with its QNN wrapper (breaks plain CPU models: "backend library does not exist"); s2s_edge/__init__ keeps the real one."""
+    from . import _ort_real
+    return _ort_real.InferenceSession(path, so, providers=providers or ["CPUExecutionProvider"])
+
+
 class Graph:
     name = "graph"
 
@@ -26,10 +32,10 @@ class Graph:
 
 class OrtGraph(Graph):
     def __init__(self, path, name=None):
-        super().__init__(); import onnxruntime as ort
+        super().__init__(); from . import _ort_real as ort
         so = ort.SessionOptions(); so.log_severity_level = 3; so.enable_cpu_mem_arena = False; so.enable_mem_pattern = False
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
-        self.s = ort.InferenceSession(path, so, providers=["CPUExecutionProvider"]); self.name = name or os.path.basename(path)
+        self.s = _ort_session(path, so, providers=["CPUExecutionProvider"]); self.name = name or os.path.basename(path)
         self.in_names = [i.name for i in self.s.get_inputs()]
         self.in_types = {i.name: {"tensor(int64)": np.int64, "tensor(int32)": np.int32, "tensor(float)": np.float32, "tensor(float16)": np.float16}.get(i.type, np.float32) for i in self.s.get_inputs()}
 
@@ -69,14 +75,24 @@ def _qnn_init():
     _qnn_ready = True
 
 
+def fix_int_output(o, dt):
+    """On the AIBOX 8550 (qai_appbuilder 2.51.40) small integer outputs (lengths, token ids: tts_vi / tts_zh length, asr lengths, greedy MT token) come back as a
+    float32 array that holds the INT32 BIT PATTERN (216 -> 3.03e-43), which breaks every consumer (empty ASR text, zero-length audio). `dt` = the dtype the graph
+    really has (taken from the golden reference). Bit patterns of small ints are denormal floats, so: all values tiny -> reinterpret bits; otherwise cast the values."""
+    o = np.ascontiguousarray(np.asarray(o))
+    if dt is None or o.dtype == dt or not np.issubdtype(dt, np.integer) or o.dtype.kind != "f": return o
+    if o.dtype.itemsize == 4 and np.all(np.abs(o) < 1e-30): return o.view(np.int32).astype(dt)
+    return np.rint(o).astype(dt)
+
+
 class QnnGraph(Graph):
     """One compiled graph on the Hexagon NPU through QAI AppBuilder. `path` is a context binary (.bin from an AI Hub link job, must match the wheel's
     QAIRT version) or a portable .dlc (needs QAIRT >= 2.41; the first load writes a cached <name>.dlc.bin next to it, later loads are fast).
     Inputs / outputs use the graph's native dtypes (int32 ids, float32 tensors). Output order is the graph's output order; `out_order` can
     remap it if golden check shows a permutation (models.json: "out": [index, ...])."""
 
-    def __init__(self, path, name=None, input_order=None, output_order=None):
-        super().__init__(); _qnn_init()
+    def __init__(self, path, name=None, input_order=None, output_order=None, in_quant=None):
+        super().__init__(); _qnn_init(); self.in_quant = in_quant or {}
         from qai_appbuilder import QNNContext
         self.path = path; self.name = name or os.path.basename(path); self.out_order = output_order
         # keyword arguments: the positional order of QNNContext is (name, path, backend_lib, system_lib, is_async, input_dtype, output_dtype, ...)
@@ -86,12 +102,28 @@ class QnnGraph(Graph):
             except Exception: return default
         self.in_names = _try(self.ctx.getInputName, None); self.in_shapes = _try(self.ctx.getInputShapes, None); self.in_types = _try(self.ctx.getInputDataType, None)
         self.out_shapes = _try(self.ctx.getOutputShapes, None); self.out_types = _try(self.ctx.getOutputDataType, None)
-        self.in_order = input_order or self.in_names
+        self.in_order = input_order or self.in_names; self.out_dtypes = None
+
+    def set_out_dtypes(self, specs):
+        """[(dtype, size), ...] of the graph outputs as in golden/<graph>.npz; used by fix_int_output. Matched to the real outputs by position when the sizes
+        agree, otherwise by size (the order of some chip outputs is permuted, e.g. MeloTTS returns (length, audio): never apply an integer dtype to the audio)."""
+        self.out_dtypes = [(np.dtype(d), int(n)) for d, n in specs]
+
+    def _dtype_for(self, i, o, used):
+        specs = self.out_dtypes
+        if i < len(specs) and specs[i][1] == o.size and i not in used: used.add(i); return specs[i][0]
+        cand = [j for j, (_, n) in enumerate(specs) if n == o.size and j not in used]
+        if len(cand) == 1: used.add(cand[0]); return specs[cand[0]][0]
+        return None                                                            # ambiguous or unknown: leave the array as it is
 
     def run(self, inputs):
         order = self.in_order or list(inputs); arrs = []
         for i, k in enumerate(order):
             a = inputs[k]
+            if k in self.in_quant:
+                # Quantized input (the w8a16 SenseVoice encoder: fbank is UFIXED_POINT_16). With native I/O the bytes go to the HTP as they are, so float features
+                # must be quantized here: q = round(x / scale) - offset (QNN convention real = (q + offset) * scale). Without this the encoder hears noise.
+                sc, off = self.in_quant[k]; arrs.append(np.ascontiguousarray(np.clip(np.rint(np.asarray(a, np.float64) / sc) - off, 0, 65535).astype(np.uint16)).reshape(-1)); continue
             if self.in_types and i < len(self.in_types):
                 dt = _NP.get(str(self.in_types[i]).lower().replace("np.", "").replace("numpy.", ""), None)
                 if dt is not None: a = a.astype(dt, copy=False)
@@ -103,7 +135,10 @@ class QnnGraph(Graph):
                 try: o = o.reshape(tuple(self.out_shapes[i]))
                 except Exception: pass
             res.append(o)
-        return [res[j] for j in self.out_order] if self.out_order else res
+        res = [res[j] for j in self.out_order] if self.out_order else res
+        if self.out_dtypes:
+            used = set(); res = [fix_int_output(o, self._dtype_for(i, np.asarray(o), used)) for i, o in enumerate(res)]
+        return res
 
     def release(self):
         """QNNContext.release() frees the context (and its HTP memory) deterministically (qai_appbuilder >= 2.51)."""
@@ -115,5 +150,5 @@ class QnnGraph(Graph):
 def make_graph(model_dir, spec, backend):
     """spec: {'onnx': relative path (cpu ref), 'ctx': relative path (npu), 'in': [...], 'out': [...]}"""
     if backend == "cpu": return OrtGraph(os.path.join(model_dir, spec["onnx"]), spec.get("name"))
-    if backend == "npu": return QnnGraph(os.path.join(model_dir, spec["ctx"]), spec.get("name"), spec.get("in"), spec.get("out"))
+    if backend == "npu": return QnnGraph(os.path.join(model_dir, spec["ctx"]), spec.get("name"), spec.get("in"), spec.get("out"), spec.get("in_quant"))
     raise ValueError(backend)

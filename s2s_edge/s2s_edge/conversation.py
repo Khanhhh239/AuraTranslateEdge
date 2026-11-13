@@ -12,7 +12,10 @@ from .audio import SR, segment, normalize_level
 from .asr import AsrXx
 from .names import NameTransliterator
 from .textnorm import vi_punct
+from .asr_clean import clean_asr, clean_mt
+from .ko_polite import polite as ko_polite
 import os, time
+MT_SPLIT = os.environ.get("S2S_MT_SPLIT", "1") != "0"
 
 # Punctuation/casing for the Vietnamese ASR text (Zipformer outputs lower case, no punctuation) before MT:
 #   S2S_VI_PUNCT=model : (default) vibert-capu int8 on the CPU (s2s_edge/punct_vi.py), falls back to the rule when assets/vi_capu is missing.
@@ -74,6 +77,22 @@ class Engine:
 
     def gtime(self, graphs): return sum(g.total_s for g in graphs), sum(g.calls for g in graphs)
 
+    def translate_text(self, text, src, tgt):
+        """Text -> target text, the one MT path used by every caller (file, live, stream, web batch, typed text).
+        Multi-sentence input is translated sentence by sentence with the same split_sentences the MT class uses (mt.py), so the guard, names and ko
+        politeness run per sentence and a lone "Vâng." stays attached to its neighbour. (The chip MT class already split sentences before 13/11; what was
+        fixed is that its splitter cut numbers such as "15.000", "36.5" and "a.m.".) S2S_MT_SPLIT=0 skips the split here (the MT class still splits). Returns (text, tags)."""
+        if not text or not text.strip(): return "", []
+        parts = split_sentences(text, src) if MT_SPLIT else [text]; outs, tags = [], []
+        for p in parts:
+            m, tg = clean_mt(self.mt(p, src, tgt), p, tgt)                                  # block symbols, copied "问:" label, leading dash/punctuation, "。" in vi/en
+            if tgt in ("zh", "ko") and m: m = self.names(m, tgt)
+            if tgt == "ko" and m: m = ko_polite(m)                                           # banmal -> polite -요 endings (S2S_KO_POLITE=0 to disable)
+            if m: outs.append(m)
+            tags += [t for t in tg if t not in tags]
+        if len(parts) > 1: tags.append("mt_split")
+        return ("" if tgt == "zh" else " ").join(outs), tags
+
     def translate_segment(self, wav, src, tgt, text=None, prepped=False):
         """text: pre-computed ASR text (language identification already ran the ASR)."""
         wav = wav if prepped else self.prep(wav); gr = self.graphs_for(src, tgt); g0, c0 = self.gtime(gr); t = {}; a = time.perf_counter()
@@ -81,15 +100,14 @@ class Engine:
         for pat, rep in (self.r.glossary.get("_asr_fix", {}).get(src, {}) or {}).items():      # domain fixes: how the ASR (mis)spells a term -> the term
             text = re.sub(pat, rep, text, flags=re.IGNORECASE)
         b = time.perf_counter(); t["asr_s"] = b - a
-        if len(re.sub(r"[\W_]+", "", text)) < 2: text = ""                                 # nothing intelligible (noise, breath, a lone "I.")
+        asr_raw = text; text, clean_tags = clean_asr(text, src)                               # stray label ("Q. "), leading "Um.", stuck repeats, nothing intelligible (noise, breath, a lone "I.")
         if src == "vi" and text and VI_PUNCT: text = restore_vi(text)                                   # the CTC model outputs no punctuation: restore "?" so MT keeps questions
-        mt_text = self.mt(text, src, tgt) if text.strip() else ""
-        if tgt in ("zh", "ko") and mt_text: mt_text = self.names(mt_text, tgt)
+        mt_text, mt_tags = self.translate_text(text, src, tgt)                                # sentence by sentence + output guard + names + ko politeness
         c = time.perf_counter(); t["mt_s"] = c - b; tts = self.tts(tgt)
         out, sr = tts.synthesize(mt_text) if mt_text.strip() else (np.zeros(0, np.float32), tts.sr); d = time.perf_counter(); t["tts_s"] = d - c
         g1, c1 = self.gtime(gr); t["total_s"] = d - a; t["graph_s"] = g1 - g0; t["graph_calls"] = c1 - c0; t["host_s"] = t["total_s"] - t["graph_s"]
         t["audio_in_s"] = len(wav) / SR; t["audio_out_s"] = len(out) / sr
-        return dict(src=src, tgt=tgt, asr=text, mt=mt_text, wav=out, sr=sr, timing=t)
+        return dict(src=src, tgt=tgt, asr=text, asr_raw=asr_raw, asr_clean=clean_tags + mt_tags, mt=mt_text, wav=out, sr=sr, timing=t)
 
     def translate_segment_stream(self, wav, src, tgt, text=None, prepped=False):
         """Pipelined version for live output: ASR once, split the (punctuated) transcript into sentences, then MT + TTS sentence by sentence and
@@ -100,32 +118,20 @@ class Engine:
         for pat, rep in (self.r.glossary.get("_asr_fix", {}).get(src, {}) or {}).items():
             text = re.sub(pat, rep, text, flags=re.IGNORECASE)
         asr_s = time.perf_counter() - a
-        if len(re.sub(r"[\W_]+", "", text)) < 2: return
+        asr_raw = text; text, clean_tags = clean_asr(text, src)
+        if not text: return
         if src == "vi" and VI_PUNCT: text = restore_vi(text)
         parts = split_sentences(text, src); tts = self.tts(tgt)
         for i, sent in enumerate(parts):
             g0, c0 = self.gtime(gr); b = time.perf_counter()
-            mt_text = self.mt(sent, src, tgt)
-            if tgt in ("zh", "ko") and mt_text: mt_text = self.names(mt_text, tgt)
+            mt_text, mt_tags = self.translate_text(sent, src, tgt)
             c = time.perf_counter(); out, sr = tts.synthesize(mt_text) if mt_text.strip() else (np.zeros(0, np.float32), tts.sr); d = time.perf_counter()
             g1, c1 = self.gtime(gr); t = dict(asr_s=asr_s if i == 0 else 0.0, mt_s=c - b, tts_s=d - c, total_s=(d - a) if i == 0 else (d - b), graph_s=g1 - g0, graph_calls=c1 - c0)
             t["host_s"] = t["total_s"] - t["graph_s"]; t["audio_in_s"] = len(wav) / SR if i == 0 else 0.0; t["audio_out_s"] = len(out) / sr
-            yield dict(src=src, tgt=tgt, asr=sent, mt=mt_text, wav=out, sr=sr, timing=t, part=(i, len(parts)))
+            yield dict(src=src, tgt=tgt, asr=sent, asr_raw=asr_raw, asr_clean=clean_tags + mt_tags, mt=mt_text, wav=out, sr=sr, timing=t, part=(i, len(parts)))
 
 
-_SENT = re.compile(r"(?<=[\.\!\?。！？])\s+|(?<=[。！？])")
-
-
-def split_sentences(text, lang):
-    """Sentences of a punctuated transcript (vibert-capu output for vi, SenseVoice for en/zh/ko). Pieces of < 2 words (< 3 chars for zh/ko,
-    e.g. a lone 'Vâng.') are merged into the neighbour so MT never gets a fragment out of context."""
-    parts = [p.strip() for p in _SENT.split(text.strip()) if p and p.strip()]
-    small = (lambda p: len(re.sub(r"\W", "", p)) < 3) if lang in ("zh", "ko") else (lambda p: len(p.split()) < 2)
-    out = []
-    for p in parts:
-        if out and (small(p) or small(out[-1])): out[-1] = (out[-1] + ("" if lang in ("zh",) else " ") + p).strip()
-        else: out.append(p)
-    return out or [text]
+from .mt import split_sentences                                                    # one sentence splitter for the pipeline and the MT class
 
 
 class LanguageID:
@@ -171,7 +177,9 @@ class Conversation:
     def translate(self, wav, max_seg_s=12.0):
         out = []
         for a, b in segment(wav, max_s=max_seg_s):
-            seg = self.e.prep(wav[a:b]); src, tgt, text, st = self.route(seg); r = self.e.translate_segment(seg, src, tgt, text=text, prepped=True)
+            seg = self.e.prep(wav[a:b]); t0 = time.perf_counter(); src, tgt, text, st = self.route(seg); dt = time.perf_counter() - t0
+            r = self.e.translate_segment(seg, src, tgt, text=text, prepped=True)
+            r["timing"]["asr_s"] += dt; r["timing"]["total_s"] += dt          # route() = ASR + language id (graph_s does not include it)
             r["span"] = (a / SR, b / SR); r["lid"] = st
             if r["mt"]: out.append(r)
         return out
@@ -179,7 +187,8 @@ class Conversation:
     def translate_stream(self, wav, max_seg_s=12.0):
         """Generator: one result per sentence as soon as its audio is ready (see Engine.translate_segment_stream)."""
         for a, b in segment(wav, max_s=max_seg_s):
-            seg = self.e.prep(wav[a:b]); src, tgt, text, st = self.route(seg)
+            seg = self.e.prep(wav[a:b]); t0 = time.perf_counter(); src, tgt, text, st = self.route(seg); dt = time.perf_counter() - t0
             for r in self.e.translate_segment_stream(seg, src, tgt, text=text, prepped=True):
+                if r.get("part", (0, 1))[0] == 0: r["timing"]["asr_s"] += dt; r["timing"]["total_s"] += dt     # route() = ASR + language id
                 r["span"] = (a / SR, b / SR); r["lid"] = st
                 if r["mt"]: yield r
