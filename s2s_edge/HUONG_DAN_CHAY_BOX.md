@@ -101,6 +101,13 @@ Hai web không chạy cùng lúc được, vì mỗi cái nạp một bộ model
 
 **Chưa kiểm trên hộp thật:** chất lượng và thời gian của bản gộp trên NPU, RAM khi nạp 3.3B cùng ASR/TTS, mic thật trên web demo. Lần đầu lên hộp hãy chạy `bash start.sh check`, rồi `bash start.sh demo`.
 
+**Nên chạy thêm trên hộp** (ảnh hưởng chế độ hội thoại, chưa từng đo trên dữ liệu thật):
+```bash
+cd /tmp/onevoice/s2s_edge_pkg && . .venv/bin/activate && . tools/env.sh
+python tools/lid_eval.py --data_root /tmp/onevoice          # nhận dạng ngôn ngữ trên BTC + ADV, nguyên clip / 3 s / 1,5 s, 4 mức nhiễu; thêm --auto cho en/zh/ko
+```
+Kết quả ở `logs/lid_eval/lid_eval.md` (ma trận nhầm lẫn và danh sách từng câu nhận sai). Nếu nhận tiếng Việt kém ở câu ngắn hoặc có nhiễu, dùng "chiều cố định" trên web thay cho "hội thoại".
+
 ## 7. Cho người phát triển
 
 ```bash
